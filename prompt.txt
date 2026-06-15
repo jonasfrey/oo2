@@ -1,0 +1,133 @@
+You are a senior JavaScript/WebGL engineer experienced with three.js, mesh
+geometry, and 3D-printing (print-in-place / articulated models). Build a
+polished single-page web application — a single `index.html` with inline CSS
+and ES-module JavaScript, all libraries loaded from a CDN, no build step.
+
+PURPOSE
+The user designs print-in-place ARTICULATED parts: one part has a "pin" feature
+and a "hole" feature. When two copies are placed so that the hole of one sits
+exactly where the pin of its neighbour is, the parts interlock WITHOUT their
+meshes touching (a small print clearance gap), forming a chain link joint.
+The app must take ONE uploaded part and lay out many copies of it on a flat
+build plate in a SPIRAL, each link mated to the previous one, such that:
+  - every consecutive pair is interlocked (hole-on-pin), and
+  - NO two part meshes overlap or touch (collision-free, so it prints as a
+    fully articulated chain), and
+  - the whole chain curls into a non-self-intersecting spiral that fits the plate.
+Finally the user downloads the whole arrangement as a single STL.
+
+TECH STACK
+- three.js (latest) for rendering, geometry, math, raycasting.
+- three.js addons: OrbitControls, STLLoader, STLExporter, GLTFLoader (also
+  accept .glb/.gltf input), BufferGeometryUtils (mergeGeometries).
+- three-mesh-bvh for FAST mesh-vs-mesh collision detection
+  (computeBoundsTree + bvh.intersectsGeometry). Do NOT brute-force triangle
+  tests — use the BVH.
+- No server needed; everything runs client-side. Assume STL units are
+  millimetres; for glTF let the user set/confirm a unit scale.
+
+KEY IDEA — work in 2D on the build plate
+After the part is laid flat (its chosen face on Z=0), EVERY placement is a 2D
+rigid motion in the XY plane: a translation (x,y) plus a rotation θ about Z.
+Z never changes between links. This keeps the whole layout problem 2D.
+
+WORKFLOW (4 STEPS, presented as a wizard; gate each step on the previous one)
+
+STEP 1 — UPLOAD & ALIGN
+  - Drag-and-drop / file-picker to load a .stl or .glb/.gltf mesh. Show it in an
+    orbit-controllable viewport with a build-plate grid and axes helper.
+  - AUTO-ALIGN: compute the part's principal axes via PCA (eigenvectors of the
+    vertex covariance matrix) — or an oriented bounding box — and rotate the
+    part so its principal axes align with X/Y/Z and its centre sits at the
+    origin. The parts are often symmetrical but arbitrarily rotated; this gives
+    a sane starting orientation.
+  - PICK FACE TO LAY FLAT: let the user click a triangle/face in the viewport
+    (raycast). Take that face's outward normal, compute the rotation that maps
+    that normal to -Z, apply it, then translate so the part's min-Z = 0 (sits ON
+    the plate). Provide a "lay flat on picked face" button and a manual
+    90°-rotation nudge for X/Y/Z as backup. Show a clear visual of which face is
+    selected (highlight it).
+
+STEP 2 — DEFINE PIN ANCHOR AND HOLE ANCHOR
+  - With the part flat, the user defines two 2D anchor frames in the plate plane:
+      * PIN anchor:  a point (x,y) + a direction angle, marking where this part's
+        pin is.
+      * HOLE anchor: a point (x,y) + a direction angle, marking where this part's
+        hole is.
+    Let the user place each anchor by clicking on the part (raycast to the XY
+    plane / nearest surface point) and set its direction with a small rotation
+    handle or a numeric input. Render both anchors as labelled gizmos (e.g. pin =
+    red arrow, hole = blue ring) overlaid on the part.
+  - MATING RULE: copy N+1 is positioned and rotated so that its HOLE anchor frame
+    coincides with copy N's PIN anchor frame. Formally, the relative transform
+    between consecutive links is the rigid 2D transform J that maps the part's
+    HOLE frame onto its PIN frame; then pose(N+1) = pose(N) · J. Implement this
+    with three.js Matrix4/quaternions, constrained to the XY plane.
+  - This single mated transform, applied repeatedly from a seed link, generates
+    the whole chain. (A constant J traces a circle/arc; the spiral controls in
+    Step 3 open it up.)
+
+STEP 3 — FINETUNE THE SPIRAL (live, collision-checked)
+  Provide sliders / numeric inputs that modify the per-joint transform and
+  regenerate the layout in real time:
+    - Number of links (count).
+    - JOINT (HINGE) ANGLE: an extra rotation added at each joint about the pin
+      anchor — this is the main knob that bends a straight chain into a curve.
+    - GAP / CLEARANCE: a small extra offset along the mating direction so meshes
+      keep a print clearance and never touch (default a few tenths of a mm;
+      expose as a named constant).
+    - SPIRAL OPENING: a per-step increment applied to the joint angle and/or a
+      small per-step radial growth, so the curve becomes an opening spiral that
+      does NOT close back onto itself (think Archimedean / logarithmic spiral)
+      rather than a ring.
+    - Optional per-link Z micro-offset = 0 (keep all on the plate) — confirm all
+      links stay coplanar for print-in-place.
+  COLLISION DETECTION (critical):
+    - After each regeneration, test every placed link against the others using
+      three-mesh-bvh (`intersectsGeometry` with the relative transform). It is
+      enough to test each link against its non-adjacent neighbours and any link
+      whose bounding box overlaps; immediate neighbours are SUPPOSED to interlock
+      so test that they do not actually share triangles (interlocked ≠
+      overlapping).
+    - Highlight any colliding/overlapping links in RED and show a count of
+      collisions; show GREEN / "no overlaps" when the layout is clean.
+    - (Nice-to-have) an "auto-solve" button that searches the joint-angle / gap /
+      spiral-opening parameters to find a collision-free spiral automatically.
+    - Live preview: render all links in the viewport, colour-coded, updating as
+      sliders move. Show the overall footprint vs a configurable build-plate size
+      and warn if the spiral exceeds the plate.
+
+STEP 4 — EXPORT
+  - Merge all placed link instances into ONE geometry: for each link, clone the
+    aligned base geometry, bake its world matrix (applyMatrix4), then combine via
+    BufferGeometryUtils.mergeGeometries. The links stay as separate, disconnected
+    solids within the one mesh — that is exactly what a print-in-place
+    articulated chain needs (multiple shells, no touching faces).
+  - Export with STLExporter as a single binary `.stl` and trigger download
+    (e.g. `articulated_spiral.stl`). Also offer saving/loading the current
+    configuration (alignment, anchors, slider values) as a JSON file so the user
+    can resume.
+
+UI / UX
+  - Big 3D viewport + a side panel with the four steps grouped and gated.
+  - Use millimetres throughout, label inputs with "mm" / "°".
+  - Clear status messages (no mesh loaded, non-collision-free, spiral off-plate).
+  - Keep all clearances/tolerances and the plate size as named constants at the
+    top of the script so they are easy to tweak.
+
+ROBUSTNESS / EDGE CASES
+  - Handle large meshes without freezing: reuse ONE base geometry + per-link
+    Matrix4 instances (don't deep-copy meshes per link for rendering); use
+    InstancedMesh for the live preview where possible.
+  - Recompute the BVH once on the base geometry and reuse it for all pairwise
+    collision tests with relative transforms.
+  - Guard against degenerate anchors (pin == hole, zero-length direction).
+  - Make sure auto-align + lay-flat are idempotent and re-runnable.
+
+DELIVERABLE
+Deliver the complete, runnable `index.html` in a single code block with clear,
+sectioned comments. After the code, briefly explain: (1) how auto-align (PCA)
+and the pick-face-to-lay-flat rotation work, (2) how the pin/hole anchor frames
+define the repeated mating transform that builds the chain, (3) how the spiral
+controls open the chain and how three-mesh-bvh verifies the layout is
+overlap-free, and (4) how the links are merged and exported as one STL.

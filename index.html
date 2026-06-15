@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Articulated Spiral Builder — print-in-place chain layout</title>
+<style>
+  /* ============================ THEME / LAYOUT ============================ */
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1d2530; --line:#2b3441;
+    --ink:#e6edf3; --muted:#8b97a6; --accent:#4cc2ff; --accent2:#7ee787;
+    --bad:#ff6b6b; --warn:#ffcc66; --pin:#ff5d5d; --hole:#5db0ff;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:Inter,Segoe UI,Roboto,system-ui,sans-serif;
+    background:var(--bg);color:var(--ink);overflow:hidden}
+  #app{display:grid;grid-template-columns:380px 1fr;height:100%}
+  /* ----- side panel ----- */
+  #panel{background:var(--panel);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;min-height:0}
+  #panel header{padding:14px 16px;border-bottom:1px solid var(--line)}
+  #panel header h1{font-size:15px;margin:0;letter-spacing:.2px}
+  #panel header p{margin:4px 0 0;font-size:11px;color:var(--muted)}
+  #steps{overflow:auto;padding:10px 12px;flex:1;min-height:0}
+  .step{border:1px solid var(--line);border-radius:var(--radius);margin-bottom:10px;
+    background:var(--panel2);overflow:hidden;transition:opacity .2s}
+  .step.locked{opacity:.45;pointer-events:none;filter:grayscale(.4)}
+  .step > .head{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;
+    font-weight:600;font-size:13px;user-select:none}
+  .step .num{width:20px;height:20px;border-radius:50%;background:var(--line);
+    display:grid;place-items:center;font-size:11px;color:var(--muted);flex:none}
+  .step.done .num{background:var(--accent2);color:#06210d}
+  .step.active .num{background:var(--accent);color:#04263a}
+  .step .body{padding:0 12px 12px;display:none;font-size:12px}
+  .step.open .body{display:block}
+  .row{display:flex;align-items:center;gap:8px;margin:8px 0}
+  .row label{flex:1;color:var(--muted)}
+  .row.col{flex-direction:column;align-items:stretch;gap:4px}
+  input[type=number],input[type=text]{width:90px;background:#0c1117;border:1px solid var(--line);
+    color:var(--ink);border-radius:6px;padding:5px 7px;font-size:12px}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  button{background:var(--accent);color:#04263a;border:0;border-radius:7px;padding:8px 10px;
+    font-weight:600;font-size:12px;cursor:pointer}
+  button.ghost{background:#21303d;color:var(--ink)}
+  button.tiny{padding:4px 7px;font-size:11px}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .btnrow{display:flex;gap:6px;flex-wrap:wrap}
+  .hint{font-size:11px;color:var(--muted);line-height:1.5;margin:6px 0}
+  .pill{display:inline-block;padding:2px 7px;border-radius:20px;font-size:11px;font-weight:600}
+  .pill.armed{background:var(--warn);color:#2a1d00}
+  kbd{background:#0c1117;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:11px}
+  /* ----- viewport ----- */
+  #view{position:relative;min-width:0}
+  #canvasWrap{position:absolute;inset:0}
+  #drop{position:absolute;inset:0;display:grid;place-items:center;z-index:5;
+    background:rgba(8,11,16,.85);border:2px dashed var(--line);margin:18px;border-radius:16px}
+  #drop.hide{display:none}
+  #drop .inner{text-align:center;color:var(--muted)}
+  #drop.hot{border-color:var(--accent);background:rgba(76,194,255,.08)}
+  #hud{position:absolute;left:14px;top:12px;z-index:4;display:flex;gap:8px;flex-wrap:wrap;max-width:70%}
+  .chip{background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:20px;
+    padding:5px 11px;font-size:12px;backdrop-filter:blur(4px)}
+  .chip b{color:var(--ink)} .chip .ok{color:var(--accent2)} .chip .err{color:var(--bad)} .chip .warn{color:var(--warn)}
+  #status{position:absolute;left:14px;bottom:12px;z-index:4;font-size:12px;color:var(--muted);
+    background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:8px;padding:6px 10px;max-width:80%}
+  #status.err{color:var(--bad);border-color:var(--bad)}
+  #status.ok{color:var(--accent2)}
+  .swatch{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px}
+  a.link{color:var(--accent);cursor:pointer;text-decoration:underline}
+  .grp{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}
+  #projList{display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:200px;overflow:auto}
+  .projrow{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--line);
+    border-radius:7px;background:#0c1117}
+  .projrow.cur{border-color:var(--accent)}
+  .projinfo{flex:1;min-width:0;display:flex;flex-direction:column;font-size:12px;overflow:hidden}
+  .projinfo b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .projmeta{color:var(--muted);font-size:10px}
+  .grp h4{margin:0 0 4px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- ============================ SIDE PANEL ============================ -->
+  <aside id="panel">
+    <header>
+      <h1>Articulated Spiral Builder</h1>
+      <p>Print-in-place chain layout → single STL</p>
+    </header>
+    <div id="steps">
+
+      <!-- PROJECTS -->
+      <section class="step open" id="proj">
+        <div class="head"><span class="num">★</span> Projects</div>
+        <div class="body" style="display:block">
+          <div class="row"><input id="projName" type="text" placeholder="project name…" style="flex:1;width:auto"></div>
+          <div class="btnrow">
+            <button id="projSaveNew" class="tiny">Save as new</button>
+            <button id="projUpdate" class="ghost tiny">Update current</button>
+            <button id="projRefresh" class="ghost tiny">↻</button>
+          </div>
+          <p class="hint" id="projMsg"></p>
+          <div id="projList"><p class="hint">No saved projects yet.</p></div>
+        </div>
+      </section>
+
+      <!-- STEP 1 -->
+      <section class="step open active" id="s1">
+        <div class="head"><span class="num">1</span> Upload &amp; align</div>
+        <div class="body">
+          <div class="btnrow">
+            <button id="fileBtn" class="ghost">Choose file…</button>
+            <input id="fileInput" type="file" accept=".stl,.glb,.gltf" hidden />
+          </div>
+          <p class="hint">Drag a <b>.stl</b> / <b>.glb</b> / <b>.gltf</b> onto the viewport. STL = millimetres.</p>
+          <div class="row"><label>glTF unit scale → mm</label>
+            <input id="unitScale" type="number" value="1" step="0.1" min="0.0001"></div>
+          <div class="grp">
+            <h4>Orient</h4>
+            <div class="btnrow">
+              <button id="autoAlign" class="ghost tiny">Auto-align (PCA)</button>
+              <button id="rotX" class="ghost tiny">Rot X 90°</button>
+              <button id="rotY" class="ghost tiny">Rot Y 90°</button>
+              <button id="rotZ" class="ghost tiny">Rot Z 90°</button>
+            </div>
+            <p class="hint">Then click a triangle to pick the face to rest on the plate:</p>
+            <div class="btnrow">
+              <button id="pickFace" class="ghost tiny">Pick face to lay flat <span id="pickFaceArmed"></span></button>
+              <button id="layFlat" class="tiny">Lay flat on picked face</button>
+              <button id="alignZ" class="ghost tiny">Auto-rotate</button>
+            </div>
+            <div class="row col" style="margin-top:8px">
+              <div class="row" style="margin:0"><label>Part rotation Z (°)</label><input id="partZ" type="number" step="1" value="0"></div>
+              <input id="partZR" type="range" min="-180" max="180" step="1" value="0">
+            </div>
+          </div>
+          <div class="grp">
+            <h4>Symmetry</h4>
+            <div class="btnrow">
+              <button id="findSym" class="ghost tiny">Find mirror lines</button>
+              <button id="toggleSym" class="ghost tiny">Show / hide</button>
+            </div>
+            <p class="hint">Detects the part's vertical mirror planes (<span class="swatch" style="background:#ff3df0"></span>magenta lines). Lay flat first for best results — lines follow every rotation.</p>
+            <p class="hint" id="symOut"></p>
+          </div>
+          <div class="row" style="margin-top:10px"><button id="s1next" disabled>Confirm orientation →</button></div>
+        </div>
+      </section>
+
+      <!-- STEP 2 -->
+      <section class="step locked" id="s2">
+        <div class="head"><span class="num">2</span> Mark pin &amp; hole</div>
+        <div class="body">
+          <p class="hint"><span class="swatch" style="background:var(--pin)"></span><b>Pin</b> and
+             <span class="swatch" style="background:var(--hole)"></span><b>hole</b> are shown as vertical cylinders.
+             Each next link is placed so its <b>hole lands on the previous link's pin</b>.</p>
+          <div class="grp">
+            <h4>Pin location</h4>
+            <div class="btnrow"><button id="placePin" class="ghost tiny">Click part to place pin <span id="placePinArmed"></span></button></div>
+            <div class="row"><label>x / y (mm)</label>
+              <input id="pinX" type="number" step="0.5" value="0"><input id="pinY" type="number" step="0.5" value="0"></div>
+          </div>
+          <div class="grp">
+            <h4>Hole location</h4>
+            <div class="btnrow"><button id="placeHole" class="ghost tiny">Click part to place hole <span id="placeHoleArmed"></span></button></div>
+            <div class="row"><label>x / y (mm)</label>
+              <input id="holeX" type="number" step="0.5" value="0"><input id="holeY" type="number" step="0.5" value="0"></div>
+          </div>
+          <p class="hint" id="anchorWarn"></p>
+          <div class="row" style="margin-top:6px"><button id="s2next" disabled>Build chain →</button></div>
+        </div>
+      </section>
+
+      <!-- STEP 3 -->
+      <section class="step locked" id="s3">
+        <div class="head"><span class="num">3</span> Build chain</div>
+        <div class="body">
+          <div class="row col"><div class="row" style="margin:0"><label>Links</label><input id="count" type="number" min="2" max="5000" value="14"></div>
+            <input id="countR" type="range" min="2" max="2000" value="14"></div>
+          <div class="row col"><div class="row" style="margin:0"><label>Start radius (mm)</label><input id="startR" type="number" step="1" value="25"></div>
+            <input id="startRR" type="range" min="0" max="150" step="1" value="25"></div>
+          <div class="row col"><div class="row" style="margin:0"><label>Loop spacing (mm/turn)</label><input id="spacing" type="number" step="0.5" value="16"></div>
+            <input id="spacingR" type="range" min="2" max="60" step="0.5" value="16"></div>
+          <p class="hint">Archimedean spiral <b>r = a + bθ</b>. Start radius <b>a</b> is the innermost radius (offset so it doesn't start at the centre). Loop spacing is the radial gap between successive turns — keep it bigger than the part width so loops don't collide.</p>
+          <div class="row"><label>Plate size (mm, square)</label><input id="plate" type="number" step="10" value="220"></div>
+          <div class="btnrow" style="margin-top:6px"><button id="recheck" class="ghost tiny">Re-check collisions</button></div>
+          <p class="hint" id="solveOut"></p>
+          <div class="row" style="margin-top:6px"><button id="s3next" disabled>Go to export →</button></div>
+        </div>
+      </section>
+
+      <!-- STEP 4 -->
+      <section class="step locked" id="s4">
+        <div class="head"><span class="num">4</span> Export</div>
+        <div class="body">
+          <p class="hint">All links merge into one mesh as separate, non-touching solids — a print-in-place articulated chain.</p>
+          <div class="btnrow">
+            <button id="exportStl">⬇ Download STL</button>
+            <button id="saveCfg" class="ghost">Save config (JSON)</button>
+            <button id="loadCfg" class="ghost">Load config</button>
+            <input id="cfgInput" type="file" accept=".json" hidden>
+          </div>
+          <p class="hint" id="exportOut"></p>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- ============================ VIEWPORT ============================ -->
+  <main id="view">
+    <div id="canvasWrap"></div>
+    <div id="hud">
+      <div class="chip" id="chipMesh">No mesh loaded</div>
+      <div class="chip" id="chipSize"></div>
+      <div class="chip" id="chipCollide"></div>
+    </div>
+    <div id="status">Load a part to begin.</div>
+    <div id="drop"><div class="inner">
+      <div style="font-size:30px">⬇</div>
+      <div style="font-size:15px;margin-top:6px"><b>Drop a part here</b></div>
+      <div style="font-size:12px;margin-top:4px">.stl · .glb · .gltf</div>
+    </div></div>
+  </main>
+</div>
+
+<!-- =============================== MODULES =============================== -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.4/build/index.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+import { STLLoader }       from 'three/addons/loaders/STLLoader.js';
+import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
+import { STLExporter }     from 'three/addons/exporters/STLExporter.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, MeshBVH }
+  from 'three-mesh-bvh';
+
+// three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
+THREE.BufferGeometry.prototype.computeBoundsTree   = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree   = disposeBoundsTree;
+THREE.Mesh.prototype.raycast                       = acceleratedRaycast;
+
+/* ============================ TUNABLE CONSTANTS ============================
+   Everything a maker is likely to tweak lives here.                          */
+const CONST = {
+  DEFAULT_GAP_MM      : 0.4,    // print clearance along the mating direction
+  DEFAULT_PLATE_MM    : 220,    // square build plate edge
+  PART_COLOR          : 0x9aa7b4,
+  PIN_COLOR           : 0xff5d5d,
+  HOLE_COLOR          : 0x5db0ff,
+  LINK_OK_COLOR       : new THREE.Color(0x6fcf97),
+  LINK_BAD_COLOR      : new THREE.Color(0xff6b6b),
+  LINK_SEED_COLOR     : new THREE.Color(0x4cc2ff),
+  BBOX_PAD_MM         : 0.05,   // broadphase padding so "just touching" counts as a hit
+  COLLISION_AUTO_MAX  : 400,    // above this link count, only check collisions on demand
+};
+
+/* ================================ SCENE ================================== */
+const wrap = document.getElementById('canvasWrap');
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+wrap.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1116);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
+camera.position.set(140, -180, 160);
+camera.up.set(0,0,1);                       // Z up — we work on the XY plate
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x202830, 1.1));
+const dir = new THREE.DirectionalLight(0xffffff, 1.4); dir.position.set(80,-120,200); scene.add(dir);
+
+// Build-plate grid + axes (XY plane, Z up)
+let grid = new THREE.GridHelper(CONST.DEFAULT_PLATE_MM, 22, 0x33424f, 0x222b33);
+grid.rotation.x = Math.PI/2;               // lay grid flat on XY
+scene.add(grid);
+const axes = new THREE.AxesHelper(40); scene.add(axes);
+let plateOutline = makePlateOutline(CONST.DEFAULT_PLATE_MM); scene.add(plateOutline);
+
+function makePlateOutline(size){
+  const h=size/2;
+  const g=new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-h,-h,0),new THREE.Vector3(h,-h,0),
+    new THREE.Vector3(h,h,0),new THREE.Vector3(-h,h,0),new THREE.Vector3(-h,-h,0)]);
+  return new THREE.Line(g,new THREE.LineBasicMaterial({color:0x3a4a58}));
+}
+
+function resize(){
+  const r=wrap.getBoundingClientRect();
+  renderer.setSize(r.width,r.height,false);
+  camera.aspect=r.width/r.height; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(wrap); resize();
+
+(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera);})();
+
+/* ================================ STATE ================================== */
+const S = {
+  baseGeo:null,          // the aligned + laid-flat geometry (local coords == plate coords for one part)
+  partMesh:null,         // single part shown in steps 1-2
+  pickedNormal:null,     // world normal of picked face
+  highlight:null,        // face highlight mesh
+  pin :{x:0,y:0},        // pin  anchor POINT (mm) — no direction needed
+  hole:{x:0,y:0},        // hole anchor POINT (mm)
+  partZ:0,               // baked-in part rotation about Z (deg)
+  poses:[],              // Matrix4 per link (world)
+  chain:null,            // InstancedMesh preview
+  collideSet:new Set(),  // indices currently colliding
+  symPlanes:[],          // detected mirror planes {p:Vector3, n:Vector3, score}
+  symGroup:null,         // THREE.Group holding the mirror-line visuals
+  symVisible:true,
+  projectId:null,        // currently-loaded server project (null = unsaved)
+};
+let arm = null;          // current armed click-mode: 'pickFace','placePin','placeHole'
+
+/* ============================ DOM SHORTHANDS ============================= */
+const $ = id => document.getElementById(id);
+const status = (msg,kind='') => { const e=$('status'); e.textContent=msg; e.className=kind; };
+
+/* ======================================================================== *
+ *  STEP 1 — LOADING, AUTO-ALIGN (PCA), PICK-FACE-TO-LAY-FLAT
+ * ======================================================================== */
+
+function setBaseGeometry(geo){
+  // Normalise: non-indexed→keep, ensure normals, weld for clean BVH/normals.
+  geo = geo.index ? geo.toNonIndexed() : geo;
+  geo = BufferGeometryUtils.mergeVertices(geo);   // weld coincident verts
+  geo.computeVertexNormals();
+  geo.computeBoundingBox(); geo.computeBoundingSphere();
+
+  if (S.partMesh){ scene.remove(S.partMesh); S.partMesh.geometry.dispose(); }
+  if (S.baseGeo){ S.baseGeo.disposeBoundsTree?.(); S.baseGeo.dispose(); }
+
+  S.baseGeo = geo;
+  const mat = new THREE.MeshStandardMaterial({color:CONST.PART_COLOR,metalness:.1,roughness:.75,
+                                              flatShading:false,side:THREE.DoubleSide});
+  S.partMesh = new THREE.Mesh(geo, mat);
+  scene.add(S.partMesh);
+  S.pickedNormal=null; clearHighlight(); clearSymmetry();
+  frameCamera();
+  updateMeshChips();
+  $('s1next').disabled=false;
+  status('Part loaded. Auto-align, then pick the face to lay flat.','ok');
+}
+
+function updateMeshChips(){
+  if(!S.baseGeo) return;
+  const b=new THREE.Box3().setFromBufferAttribute(S.baseGeo.attributes.position);
+  const s=b.getSize(new THREE.Vector3());
+  $('chipMesh').innerHTML=`<b>${S.baseGeo.attributes.position.count.toLocaleString()}</b> verts`;
+  $('chipSize').innerHTML=`bbox <b>${s.x.toFixed(1)}×${s.y.toFixed(1)}×${s.z.toFixed(1)}</b> mm`;
+}
+
+function frameCamera(){
+  S.baseGeo.computeBoundingSphere();
+  const r=S.baseGeo.boundingSphere.radius||50;
+  controls.target.set(0,0,r*0.3);
+  camera.position.set(r*2.2,-r*2.8,r*2.4);
+  camera.near=r/100; camera.far=r*200; camera.updateProjectionMatrix();
+}
+
+/* ----- Bake an arbitrary Matrix4 into the base geometry (keeps mesh xform = I) ----- */
+function bakeMatrix(m){
+  S.baseGeo.applyMatrix4(m);
+  S.baseGeo.computeVertexNormals();
+  S.baseGeo.computeBoundingBox(); S.baseGeo.computeBoundingSphere();
+  S.baseGeo.disposeBoundsTree?.();              // invalidate BVH; rebuilt lazily
+  S.baseGeo.boundsTree=null;
+  updateMeshChips();
+  // mirror planes are stored in geometry coords → carry them through the SAME
+  // rigid transform so the lines stay locked to the part as it rotates.
+  if(S.symPlanes.length){
+    for(const pl of S.symPlanes){ pl.p.applyMatrix4(m); pl.n.transformDirection(m); }
+    buildSymLines();
+  }
+}
+
+/* ----- AUTO-ALIGN via PCA ----------------------------------------------------
+   1. centroid of all vertices,
+   2. 3×3 covariance matrix,
+   3. eigenvectors (Jacobi) = principal axes,
+   4. rotation that brings those axes onto X/Y/Z, translate centroid→origin.   */
+function autoAlign(){
+  if(!S.baseGeo) return;
+  const pos=S.baseGeo.attributes.position, n=pos.count;
+  let cx=0,cy=0,cz=0;
+  for(let i=0;i<n;i++){cx+=pos.getX(i);cy+=pos.getY(i);cz+=pos.getZ(i);}
+  cx/=n;cy/=n;cz/=n;
+  // covariance (symmetric)
+  let xx=0,xy=0,xz=0,yy=0,yz=0,zz=0;
+  for(let i=0;i<n;i++){
+    const dx=pos.getX(i)-cx,dy=pos.getY(i)-cy,dz=pos.getZ(i)-cz;
+    xx+=dx*dx;xy+=dx*dy;xz+=dx*dz;yy+=dy*dy;yz+=dy*dz;zz+=dz*dz;
+  }
+  const C=[[xx,xy,xz],[xy,yy,yz],[xz,yz,zz]].map(r=>r.map(v=>v/n));
+  const {vectors,values}=jacobiEigen(C);
+  // sort eigenvectors by eigenvalue descending → longest spread = X
+  const order=[0,1,2].sort((a,b)=>values[b]-values[a]);
+  let e0=col(vectors,order[0]), e1=col(vectors,order[1]), e2=col(vectors,order[2]);
+  // build orthonormal right-handed basis
+  e0.normalize(); e1.normalize();
+  e2.copy(new THREE.Vector3().crossVectors(e0,e1)).normalize(); // enforce right-handed
+  e1.copy(new THREE.Vector3().crossVectors(e2,e0)).normalize();
+  // Rotation mapping principal axes → world axes is the TRANSPOSE (basis rows).
+  const basis=new THREE.Matrix4().makeBasis(e0,e1,e2);           // axes→world
+  const align=basis.clone().transpose();                        // world→axes (inverse)
+  // First translate centroid to origin, then rotate.
+  const T=new THREE.Matrix4().makeTranslation(-cx,-cy,-cz);
+  bakeMatrix(new THREE.Matrix4().multiplyMatrices(align,T));
+  status('Auto-aligned to principal axes. Now pick the face to lay flat.','ok');
+}
+const col=(m,c)=>new THREE.Vector3(m[0][c],m[1][c],m[2][c]);
+
+/* Jacobi eigenvalue algorithm for a symmetric 3×3 matrix. */
+function jacobiEigen(A){
+  const a=A.map(r=>r.slice());
+  const V=[[1,0,0],[0,1,0],[0,0,1]];
+  for(let sweep=0;sweep<50;sweep++){
+    // largest off-diagonal
+    let p=0,q=1,max=Math.abs(a[0][1]);
+    const cand=[[0,1],[0,2],[1,2]];
+    for(const[i,j]of cand){if(Math.abs(a[i][j])>max){max=Math.abs(a[i][j]);p=i;q=j;}}
+    if(max<1e-12) break;
+    const app=a[p][p],aqq=a[q][q],apq=a[p][q];
+    const phi=0.5*Math.atan2(2*apq,aqq-app);
+    const c=Math.cos(phi),s=Math.sin(phi);
+    for(let k=0;k<3;k++){
+      const akp=a[k][p],akq=a[k][q];
+      a[k][p]=c*akp-s*akq; a[k][q]=s*akp+c*akq;
+    }
+    for(let k=0;k<3;k++){
+      const apk=a[p][k],aqk=a[q][k];
+      a[p][k]=c*apk-s*aqk; a[q][k]=s*apk+c*aqk;
+    }
+    for(let k=0;k<3;k++){
+      const vkp=V[k][p],vkq=V[k][q];
+      V[k][p]=c*vkp-s*vkq; V[k][q]=s*vkp+c*vkq;
+    }
+  }
+  return {vectors:V, values:[a[0][0],a[1][1],a[2][2]]};
+}
+
+/* ----- 90° nudges ----- */
+function nudge(axis){
+  if(!S.baseGeo) return;
+  const m=new THREE.Matrix4();
+  if(axis==='x')m.makeRotationX(Math.PI/2);
+  if(axis==='y')m.makeRotationY(Math.PI/2);
+  if(axis==='z')m.makeRotationZ(Math.PI/2);
+  bakeMatrix(m); status('Rotated 90°.');
+}
+
+/* ----- pick face → highlight + remember world normal ----- */
+const raycaster=new THREE.Raycaster();
+raycaster.firstHitOnly=true;
+const ndc=new THREE.Vector2();
+function pointerNDC(ev){
+  const r=renderer.domElement.getBoundingClientRect();
+  ndc.set(((ev.clientX-r.left)/r.width)*2-1, -((ev.clientY-r.top)/r.height)*2+1);
+  raycaster.setFromCamera(ndc,camera);
+}
+function rayPart(ev){ pointerNDC(ev); return S.partMesh? raycaster.intersectObject(S.partMesh,false)[0] : null; }
+
+function clearHighlight(){ if(S.highlight){scene.remove(S.highlight);S.highlight.geometry.dispose();S.highlight=null;} }
+
+function pickFace(hit){
+  clearHighlight();
+  const a=hit.face, posAttr=S.baseGeo.attributes.position;
+  // local == world (mesh matrix is identity), normal already in plate coords
+  S.pickedNormal=hit.face.normal.clone().normalize();
+  // highlight triangle
+  const g=new THREE.BufferGeometry();
+  const vA=new THREE.Vector3().fromBufferAttribute(posAttr,a.a);
+  const vB=new THREE.Vector3().fromBufferAttribute(posAttr,a.b);
+  const vC=new THREE.Vector3().fromBufferAttribute(posAttr,a.c);
+  g.setFromPoints([vA,vB,vC]); g.computeVertexNormals();
+  S.highlight=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xffcc66,side:THREE.DoubleSide,
+    transparent:true,opacity:.85,depthTest:false}));
+  S.highlight.renderOrder=999; scene.add(S.highlight);
+  status(`Face picked (normal ${fmtV(S.pickedNormal)}). Press “Lay flat”.`,'ok');
+}
+
+function layFlat(){
+  if(!S.pickedNormal){status('Pick a face first.','err');return;}
+  // rotate so the picked outward normal points to -Z (face rests on plate)
+  const q=new THREE.Quaternion().setFromUnitVectors(S.pickedNormal.clone(), new THREE.Vector3(0,0,-1));
+  bakeMatrix(new THREE.Matrix4().makeRotationFromQuaternion(q));
+  // drop to plate: min-Z → 0, recentre XY
+  S.baseGeo.computeBoundingBox();
+  const b=S.baseGeo.boundingBox, c=b.getCenter(new THREE.Vector3());
+  bakeMatrix(new THREE.Matrix4().makeTranslation(-c.x,-c.y,-b.min.z));
+  clearHighlight(); S.pickedNormal=null;
+  alignInPlane();                       // <-- snap the in-plane spin (the part of the
+                                        //     lay-flat rotation that setFromUnitVectors leaves free)
+  frameCamera();
+  status('Laid flat & in-plane aligned. Use “Rotate to align” or Z-90° to fine-tune.','ok');
+}
+
+/* ----- IN-PLANE (about-Z) ALIGNMENT ----------------------------------------
+   Laying a face flat fixes which way is down but NOT the spin about the new
+   vertical axis — that comes out arbitrary. Run a 2D PCA on the XY footprint
+   and rotate about Z so the part's longest in-plane axis lands on X, centred. */
+function alignInPlane(){
+  if(!S.baseGeo) return;
+  const pos=S.baseGeo.attributes.position, n=pos.count;
+  let cx=0,cy=0;
+  for(let i=0;i<n;i++){cx+=pos.getX(i);cy+=pos.getY(i);}
+  cx/=n; cy/=n;
+  let sxx=0,sxy=0,syy=0;
+  for(let i=0;i<n;i++){const dx=pos.getX(i)-cx,dy=pos.getY(i)-cy;sxx+=dx*dx;sxy+=dx*dy;syy+=dy*dy;}
+  const angle=0.5*Math.atan2(2*sxy,sxx-syy);      // major-axis angle of the 2D footprint
+  // rotate by -angle about the centroid (which also recentres XY); Z is untouched
+  const T=new THREE.Matrix4().makeTranslation(-cx,-cy,0);
+  const R=new THREE.Matrix4().makeRotationZ(-angle);
+  bakeMatrix(new THREE.Matrix4().multiplyMatrices(R,T));
+}
+
+/* ----- MIRROR-SYMMETRY DETECTION -------------------------------------------
+   For a candidate mirror plane (through the part centroid, normal n), reflect a
+   sample of vertices across it and measure how far each reflected point lands
+   from the real surface (BVH closestPointToPoint). A small RMS error ⇒ the plane
+   is a mirror plane. We scan VERTICAL planes (normal in the XY plate plane),
+   because those are exactly the ones that read as a line on the build plate.
+   Coarse 0–180° scan → keep local minima below tolerance → refine → dedupe.    */
+function geoCentroid(){
+  const pos=S.baseGeo.attributes.position,n=pos.count;let x=0,y=0,z=0;
+  for(let i=0;i<n;i++){x+=pos.getX(i);y+=pos.getY(i);z+=pos.getZ(i);}
+  return new THREE.Vector3(x/n,y/n,z/n);
+}
+const _symTarget={};
+function symScore(pts,c,n){
+  n=n.clone().normalize(); let sum=0,cnt=0;
+  const r=new THREE.Vector3();
+  for(const p of pts){
+    const d=r.copy(p).sub(c).dot(n);
+    r.copy(p).addScaledVector(n,-2*d);                  // reflect p across plane
+    const hit=S.baseGeo.boundsTree.closestPointToPoint(r,_symTarget);
+    if(hit){sum+=hit.distance*hit.distance;cnt++;}
+  }
+  return cnt? Math.sqrt(sum/cnt):Infinity;               // RMS distance (mm)
+}
+const angleModPi=a=>{a=((a%Math.PI)+Math.PI)%Math.PI; return a>Math.PI/2? a-Math.PI : a;};
+
+function detectSymmetry(){
+  if(!S.baseGeo){status('Load a part first.','err');return;}
+  ensureBVH();
+  status('Searching for mirror symmetry…');
+  $('symOut').textContent='Searching…';
+  setTimeout(()=>{                                        // defer so the UI paints
+    const pos=S.baseGeo.attributes.position, n=pos.count;
+    const stride=Math.max(1,Math.floor(n/1400));         // subsample for speed
+    const pts=[];
+    for(let i=0;i<n;i+=stride) pts.push(new THREE.Vector3().fromBufferAttribute(pos,i));
+    const c=geoCentroid();
+    S.baseGeo.computeBoundingBox();
+    const diag=S.baseGeo.boundingBox.getSize(new THREE.Vector3()).length()||1;
+    const tol=0.02*diag;                                 // "symmetric" if RMS < 2% of bbox diag
+    const STEPS=72;
+    const score=θ=>symScore(pts,c,new THREE.Vector3(Math.cos(θ),Math.sin(θ),0));
+    const arr=[];
+    for(let i=0;i<STEPS;i++){const θ=Math.PI*i/STEPS; arr.push({θ,s:score(θ)});}
+    // local minima below tolerance, then sub-step refine
+    const found=[];
+    for(let i=0;i<STEPS;i++){
+      const a=arr[(i-1+STEPS)%STEPS].s, b=arr[i].s, d=arr[(i+1)%STEPS].s;
+      if(b<tol && b<=a && b<=d){
+        let best=arr[i];
+        for(let r=-1;r<=1.0001;r+=0.1){
+          const θ=arr[i].θ+r*(Math.PI/STEPS), s=score(θ);
+          if(s<best.s)best={θ,s};
+        }
+        found.push(best);
+      }
+    }
+    found.sort((x,y)=>x.s-y.s);
+    // dedupe planes whose normals are within 4°
+    const planes=[];
+    for(const f of found){
+      if(planes.some(p=>Math.abs(angleModPi(p._θ-f.θ))<THREE.MathUtils.degToRad(4))) continue;
+      planes.push({p:c.clone(),n:new THREE.Vector3(Math.cos(f.θ),Math.sin(f.θ),0),_θ:f.θ,score:f.s});
+    }
+    S.symPlanes=planes; S.symVisible=true;
+    buildSymLines();
+    if(planes.length){
+      const errs=planes.map(p=>(p.score/diag*100).toFixed(1)+'%').join(', ');
+      status(`Found ${planes.length} mirror line${planes.length>1?'s':''} (RMS error: ${errs}).`,'ok');
+      $('symOut').innerHTML=`<b>${planes.length}</b> mirror line(s) — error ${errs}.`;
+    }else{
+      status('No vertical mirror symmetry found. Lay the part flat first, or it may be asymmetric.');
+      $('symOut').textContent='No vertical mirror symmetry detected.';
+    }
+  },20);
+}
+
+function clearSymmetry(){
+  if(S.symGroup){scene.remove(S.symGroup);S.symGroup.traverse(o=>o.geometry&&o.geometry.dispose());S.symGroup=null;}
+  S.symPlanes=[]; if($('symOut'))$('symOut').textContent='';
+}
+
+/* Draw each mirror plane as the thin line where it meets a horizontal plane
+   through the part centroid (dir = n × Z). Horizontal mirror planes (n ∥ Z)
+   can't be shown as a line and are skipped. */
+function buildSymLines(){
+  if(S.symGroup){scene.remove(S.symGroup);S.symGroup.traverse(o=>o.geometry&&o.geometry.dispose());}
+  S.symGroup=new THREE.Group();
+  S.baseGeo.computeBoundingBox();
+  const L=(S.baseGeo.boundingBox.getSize(new THREE.Vector3()).length()||50)*0.6;
+  const zAxis=new THREE.Vector3(0,0,1);
+  const mat=new THREE.LineBasicMaterial({color:0xff3df0,transparent:true,opacity:.95,depthTest:false});
+  for(const pl of S.symPlanes){
+    const dir=new THREE.Vector3().crossVectors(pl.n,zAxis);
+    if(dir.lengthSq()<1e-9) continue;                    // plane parallel to plate → no line
+    dir.normalize();
+    const a=pl.p.clone().addScaledVector(dir,-L), b=pl.p.clone().addScaledVector(dir,L);
+    const g=new THREE.BufferGeometry().setFromPoints([a,b]);
+    const line=new THREE.Line(g,mat); line.renderOrder=998;
+    S.symGroup.add(line);
+    // tiny dot at the centroid where the mirror line pivots
+    const dot=new THREE.Mesh(new THREE.SphereGeometry(L*0.012,10,8),
+      new THREE.MeshBasicMaterial({color:0xff3df0,depthTest:false}));
+    dot.position.copy(pl.p); dot.renderOrder=998; S.symGroup.add(dot);
+  }
+  S.symGroup.visible=S.symVisible;
+  scene.add(S.symGroup);
+}
+
+/* ======================================================================== *
+ *  STEP 2 — PIN / HOLE ANCHOR FRAMES + the mating transform J
+ * ======================================================================== */
+let pinGizmo,holeGizmo;
+function makeCylinderGizmo(color){
+  // a thin VERTICAL cylinder (default cylinder axis is Y → tip it to Z)
+  S.baseGeo.computeBoundingBox();
+  const zsize=S.baseGeo.boundingBox.getSize(new THREE.Vector3()).z||10;
+  const diag=S.baseGeo.boundingBox.getSize(new THREE.Vector3()).length()||40;
+  const h=zsize*1.6+6, r=Math.max(0.6,diag*0.012);
+  const g=new THREE.CylinderGeometry(r,r,h,20);
+  g.rotateX(Math.PI/2);                 // axis Y → Z
+  g.translate(0,0,h/2-2);               // base just under the plate, rising up
+  return new THREE.Mesh(g,new THREE.MeshBasicMaterial({color,depthTest:false,transparent:true,opacity:.95}));
+}
+function buildGizmos(){
+  if(pinGizmo){scene.remove(pinGizmo);pinGizmo.geometry.dispose();}
+  if(holeGizmo){scene.remove(holeGizmo);holeGizmo.geometry.dispose();}
+  pinGizmo =makeCylinderGizmo(CONST.PIN_COLOR);  pinGizmo.renderOrder=997;
+  holeGizmo=makeCylinderGizmo(CONST.HOLE_COLOR); holeGizmo.renderOrder=997;
+  scene.add(pinGizmo,holeGizmo);
+  syncGizmos();
+}
+function syncGizmos(){
+  if(pinGizmo) pinGizmo.position.set(S.pin.x,S.pin.y,0);
+  if(holeGizmo)holeGizmo.position.set(S.hole.x,S.hole.y,0);
+}
+function syncAnchorInputs(){
+  $('pinX').value=S.pin.x.toFixed(1);$('pinY').value=S.pin.y.toFixed(1);
+  $('holeX').value=S.hole.x.toFixed(1);$('holeY').value=S.hole.y.toFixed(1);
+}
+function anchorsValid(){
+  const dist=Math.hypot(S.pin.x-S.hole.x,S.pin.y-S.hole.y);
+  if(dist<1e-3){
+    $('anchorWarn').innerHTML='⚠ Pin and hole are at the same spot — links would stack. Separate them.';
+    return false;
+  }
+  $('anchorWarn').textContent='';
+  return true;
+}
+
+/* ======================================================================== *
+ *  STEP 3 — CHAIN GENERATION + SPIRAL CONTROLS + BVH COLLISION
+ * ======================================================================== */
+const P = ()=>({count:+$('count').value, startR:+$('startR').value, spacing:+$('spacing').value, plate:+$('plate').value});
+
+/* ARCHIMEDEAN LAYOUT --------------------------------------------------------
+   A real chain is a string of rigid links of fixed length d = |pin − hole|,
+   joined hole-to-pin. So we place the JOINT points Q_0,Q_1,… on an Archimedean
+   spiral r(θ)=a+bθ with equal CHORD spacing d (not arc length — chord, so the
+   joints meet exactly), then drop each link onto its segment:
+     link i: rotate+translate so local hole→Q_i and local pin→Q_{i+1}.
+   Because link i's pin and link i+1's hole both land on Q_{i+1}, the mating is
+   preserved exactly. a = start radius offset, b = spacing/2π.                  */
+function spiralPoint(a,b,th){ const r=a+b*th; return new THREE.Vector2(r*Math.cos(th),r*Math.sin(th)); }
+function buildPoses(){
+  const p=P();
+  const H=new THREE.Vector2(S.hole.x,S.hole.y), Pp=new THREE.Vector2(S.pin.x,S.pin.y);
+  const Vloc=new THREE.Vector2().subVectors(Pp,H);   // local hole→pin
+  const d=Vloc.length()||1;
+  const a=Math.max(0,p.startR), b=p.spacing/(2*Math.PI);
+  // walk the spiral, each step advancing θ until the chord from the last joint == d
+  const Q=[spiralPoint(a,b,0)];
+  let th=0;
+  for(let k=0;k<p.count;k++){
+    const prev=Q[k];
+    const dist=t=>spiralPoint(a,b,t).distanceTo(prev);
+    let lo=th, hi=th + d/Math.max(a+b*th,1) + 0.6;
+    let guard=0; while(dist(hi)<d && guard++<80) hi+=0.6;     // expand until chord ≥ d
+    for(let i=0;i<42;i++){const mid=(lo+hi)/2; if(dist(mid)<d)lo=mid; else hi=mid;}
+    th=(lo+hi)/2; Q.push(spiralPoint(a,b,th));
+  }
+  const baseAng=Math.atan2(Vloc.y,Vloc.x);
+  const poses=[];
+  for(let i=0;i<p.count;i++){
+    const seg=new THREE.Vector2().subVectors(Q[i+1],Q[i]);
+    const ang=Math.atan2(seg.y,seg.x)-baseAng;       // rotate local spine onto this segment
+    const c=Math.cos(ang),s=Math.sin(ang);
+    const m=new THREE.Matrix4().makeRotationZ(ang);
+    m.setPosition(Q[i].x-(c*H.x-s*H.y), Q[i].y-(s*H.x+c*H.y), 0);  // t = Q_i − R·hole
+    poses.push(m);
+  }
+  return poses;
+}
+
+/* Render the chain with ONE InstancedMesh (one base geo + N matrices). */
+function renderChain(poses){
+  if(S.chain){scene.remove(S.chain);S.chain.dispose();}
+  S.chain=new THREE.InstancedMesh(S.baseGeo,
+    new THREE.MeshStandardMaterial({metalness:.1,roughness:.7,flatShading:false}),
+    poses.length);
+  S.chain.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  for(let i=0;i<poses.length;i++){
+    S.chain.setMatrixAt(i,poses[i]);
+    S.chain.setColorAt(i, i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR);
+  }
+  S.chain.instanceMatrix.needsUpdate=true; if(S.chain.instanceColor)S.chain.instanceColor.needsUpdate=true;
+  scene.add(S.chain);
+  if(S.partMesh)S.partMesh.visible=false;
+  if(pinGizmo)pinGizmo.visible=false; if(holeGizmo)holeGizmo.visible=false;
+  if(S.symGroup)S.symGroup.visible=false;     // mirror lines belong to the single part
+}
+
+/* ---- BVH collision: broadphase AABB → narrowphase intersectsGeometry ---- */
+function ensureBVH(){
+  if(!S.baseGeo.boundsTree) S.baseGeo.boundsTree=new MeshBVH(S.baseGeo);
+}
+function worldAABB(pose){
+  const b=S.baseGeo.boundingBox.clone().applyMatrix4(pose);
+  b.expandByScalar(CONST.BBOX_PAD_MM);
+  return b;
+}
+/* Spatial-hash broadphase so this stays O(n) instead of O(n²): bin every link's
+   AABB into a uniform grid, then only narrow-phase pairs that share a cell.
+   Lets the collision test scale to thousands of links. */
+function checkCollisions(poses){
+  ensureBVH();
+  const n=poses.length;
+  const boxes=poses.map(worldAABB);
+  // cell size ≈ largest link footprint, so a box spans ~1–2 cells
+  let cell=0; const sz=new THREE.Vector3();
+  for(const b of boxes){b.getSize(sz);cell=Math.max(cell,sz.x,sz.y);}
+  cell=Math.max(cell,1e-3);
+  const grid=new Map();
+  for(let i=0;i<n;i++){
+    const b=boxes[i];
+    const x0=Math.floor(b.min.x/cell),x1=Math.floor(b.max.x/cell);
+    const y0=Math.floor(b.min.y/cell),y1=Math.floor(b.max.y/cell);
+    for(let cx=x0;cx<=x1;cx++)for(let cy=y0;cy<=y1;cy++){
+      const k=cx*73856093^cy*19349663; let arr=grid.get(k); if(!arr){arr=[];grid.set(k,arr);} arr.push(i);
+    }
+  }
+  const bad=new Set(), tested=new Set(); let pairs=0;
+  const inv=new THREE.Matrix4();
+  for(const arr of grid.values()){
+    for(let a=0;a<arr.length;a++)for(let bI=a+1;bI<arr.length;bI++){
+      let i=arr[a],j=arr[bI]; if(i>j){const t=i;i=j;j=t;}
+      const pk=i*n+j; if(tested.has(pk))continue; tested.add(pk);   // dedupe multi-cell pairs
+      if(!boxes[i].intersectsBox(boxes[j]))continue;
+      pairs++;
+      inv.copy(poses[i]).invert().multiply(poses[j]);
+      if(S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,inv)){ bad.add(i); bad.add(j); }
+    }
+  }
+  return {bad,pairs};
+}
+
+let regenTimer=null;
+/* force=true → always run the collision pass (the Re-check button).
+   Otherwise, above COLLISION_AUTO_MAX links we skip the live pass so dragging
+   the sliders stays smooth, and let the user trigger it on demand. */
+function regen(force){
+  if(!S.baseGeo||!anchorsValid()) return;
+  const poses=buildPoses();
+  S.poses=poses;
+  renderChain(poses);
+  // collisions (gated by count unless forced)
+  const doCheck = force || poses.length<=CONST.COLLISION_AUTO_MAX;
+  let bad=new Set(), pairs=0;
+  if(doCheck) ({bad,pairs}=checkCollisions(poses));
+  S.collideSet=bad;
+  for(let i=0;i<poses.length;i++){
+    S.chain.setColorAt(i, bad.has(i)?CONST.LINK_BAD_COLOR:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR));
+  }
+  if(S.chain.instanceColor)S.chain.instanceColor.needsUpdate=true;
+  // footprint vs plate
+  const fp=new THREE.Box3(); poses.forEach((p,i)=>fp.union(worldAABB(p)));
+  const fs=fp.getSize(new THREE.Vector3());
+  const plate=P().plate;
+  const off = fs.x>plate||fs.y>plate;
+  updatePlate(plate);
+  // HUD + status
+  const cc=$('chipCollide');
+  if(!doCheck){cc.innerHTML=`<span class="warn">${poses.length} links — press “Re-check”</span>`;}
+  else if(bad.size===0){cc.innerHTML=`<span class="ok">✓ no overlaps</span> · ${pairs} pairs tested`;}
+  else{cc.innerHTML=`<span class="err">✗ ${bad.size} links overlap</span>`;}
+  $('chipSize').innerHTML=`footprint <b>${fs.x.toFixed(0)}×${fs.y.toFixed(0)}</b> mm`;
+  let msg=`${poses.length} links · footprint ${fs.x.toFixed(0)}×${fs.y.toFixed(0)} mm.`;
+  let kind = bad.size? 'err':'ok';
+  if(!doCheck){ msg+=' Collision check skipped (large count) — press “Re-check”.'; kind=''; }
+  else if(bad.size) msg+=` ${bad.size} links collide (red).`;
+  else msg+=' No mesh overlaps.';
+  if(off){msg+=` ⚠ Exceeds ${plate} mm plate.`; if(!bad.size)kind='';}
+  status(msg,kind);
+  $('s3next').disabled=false;
+  return {bad,off};
+}
+let lastPlate=CONST.DEFAULT_PLATE_MM;
+function updatePlate(size){
+  if(size===lastPlate) return;             // only rebuild when it actually changes
+  lastPlate=size;
+  scene.remove(grid); grid.geometry.dispose();
+  grid=new THREE.GridHelper(size,Math.max(10,Math.round(size/10)),0x33424f,0x222b33);
+  grid.rotation.x=Math.PI/2; scene.add(grid);
+  scene.remove(plateOutline); plateOutline.geometry.dispose();
+  plateOutline=makePlateOutline(size); scene.add(plateOutline);
+}
+
+/* ======================================================================== *
+ *  STEP 4 — MERGE + EXPORT STL  /  SAVE-LOAD CONFIG
+ * ======================================================================== */
+function exportSTL(){
+  if(!S.poses.length){status('Build the chain first.','err');return;}
+  const geos=[];
+  for(const pose of S.poses){
+    const g=S.baseGeo.clone();
+    g.applyMatrix4(pose);            // bake world matrix → separate solid
+    g.deleteAttribute('uv');         // keep merge clean
+    geos.push(g);
+  }
+  const merged=BufferGeometryUtils.mergeGeometries(geos,false);
+  geos.forEach(g=>g.dispose());
+  const mesh=new THREE.Mesh(merged);
+  const dataView=new STLExporter().parse(mesh,{binary:true});
+  const blob=new Blob([dataView],{type:'application/octet-stream'});
+  download(blob,'articulated_spiral.stl');
+  const tris=merged.attributes.position.count/3;
+  merged.dispose();
+  $('exportOut').innerHTML=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles.`;
+  status('STL downloaded: articulated_spiral.stl','ok');
+}
+function download(blob,name){
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
+  a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+
+/* Serialize the whole working state into one plain object (used by both the
+   JSON download and the server-side projects). */
+function gatherConfig(){
+  return {
+    version:2, pin:S.pin, hole:S.hole, partZ:S.partZ,
+    params:P(),
+    symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
+    geometry:S.baseGeo? Array.from(S.baseGeo.attributes.position.array) : null,
+  };
+}
+/* Apply a config object back onto the app. */
+function applyConfig(cfg){
+  if(cfg.geometry){
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(cfg.geometry,3));
+    g.computeVertexNormals();
+    setBaseGeometry(g);                       // also clears symmetry
+  }
+  Object.assign(S.pin,cfg.pin); Object.assign(S.hole,cfg.hole);
+  S.partZ=cfg.partZ||0; $('partZ').value=S.partZ; $('partZR').value=S.partZ;
+  const p=cfg.params||{};
+  for(const k of ['count','startR','spacing','plate']) if(p[k]!=null)$(k).value=p[k];
+  if(Array.isArray(cfg.symPlanes)){
+    S.symPlanes=cfg.symPlanes.map(pl=>({p:new THREE.Vector3(...pl.p),n:new THREE.Vector3(...pl.n),score:0}));
+    buildSymLines();
+  }
+  syncRanges(); syncAnchorInputs();
+  markDone('s1'); unlock('s2'); unlock('s3'); buildGizmos();
+  openStep('s3'); regen();
+  drop.classList.add('hide');
+}
+function saveCfg(){
+  download(new Blob([JSON.stringify(gatherConfig())],{type:'application/json'}),'spiral_config.json');
+  status('Config saved (anchors + sliders + aligned geometry).','ok');
+}
+function loadCfg(file){
+  const r=new FileReader();
+  r.onload=()=>{
+    try{ applyConfig(JSON.parse(r.result)); status('Config loaded.','ok'); }
+    catch(e){status('Bad config file: '+e.message,'err');}
+  };
+  r.readAsText(file);
+}
+
+/* ======================================================================== *
+ *  PROJECTS — CRUD against the Deno server (data/projects.json)
+ * ======================================================================== */
+const API='/api/projects';
+const hasServer = location.protocol==='http:' || location.protocol==='https:';
+async function apiList(){ const r=await fetch(API); if(!r.ok)throw new Error(await r.text()); return r.json(); }
+async function apiGet(id){ const r=await fetch(`${API}/${id}`); if(!r.ok)throw new Error(await r.text()); return r.json(); }
+async function apiCreate(name,config){
+  const r=await fetch(API,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,config})});
+  if(!r.ok)throw new Error(await r.text()); return r.json();
+}
+async function apiUpdate(id,patch){
+  const r=await fetch(`${API}/${id}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(patch)});
+  if(!r.ok)throw new Error(await r.text()); return r.json();
+}
+async function apiDelete(id){ const r=await fetch(`${API}/${id}`,{method:'DELETE'}); if(!r.ok)throw new Error(await r.text()); return r.json(); }
+
+function projStatus(msg,kind=''){ const e=$('projMsg'); e.textContent=msg; e.className='hint'; if(kind==='err')e.style.color='var(--bad)'; else e.style.color=''; }
+
+async function refreshProjects(){
+  if(!hasServer){ $('projList').innerHTML='<p class="hint">Open the app via the Deno server (not file://) to manage projects.</p>'; return; }
+  try{
+    const list=await apiList();
+    if(!list.length){ $('projList').innerHTML='<p class="hint">No saved projects yet.</p>'; return; }
+    $('projList').innerHTML=list.map(p=>`
+      <div class="projrow${p.id===S.projectId?' cur':''}">
+        <div class="projinfo"><b>${escapeHtml(p.name)}</b>
+          <span class="projmeta">${p.links??'–'} links · ${new Date(p.updatedAt).toLocaleString()}</span></div>
+        <div class="btnrow">
+          <button class="ghost tiny" data-act="load" data-id="${p.id}">Load</button>
+          <button class="ghost tiny" data-act="del" data-id="${p.id}">✕</button>
+        </div>
+      </div>`).join('');
+  }catch(e){ projStatus('List failed: '+e.message,'err'); }
+}
+const escapeHtml=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function saveNewProject(){
+  if(!hasServer)return projStatus('Server not running.','err');
+  if(!S.baseGeo)return projStatus('Load a part first.','err');
+  const name=($('projName').value||'').trim()||`spiral ${new Date().toLocaleString()}`;
+  try{
+    const p=await apiCreate(name,gatherConfig());
+    S.projectId=p.id; $('projName').value='';
+    projStatus(`Saved “${p.name}”.`); refreshProjects();
+  }catch(e){ projStatus('Save failed: '+e.message,'err'); }
+}
+async function updateCurrentProject(){
+  if(!hasServer)return projStatus('Server not running.','err');
+  if(!S.projectId)return projStatus('No project loaded — use “Save as new”.','err');
+  try{
+    const name=($('projName').value||'').trim();
+    const p=await apiUpdate(S.projectId,{name:name||undefined,config:gatherConfig()});
+    projStatus(`Updated “${p.name}”.`); refreshProjects();
+  }catch(e){ projStatus('Update failed: '+e.message,'err'); }
+}
+async function loadProject(id){
+  try{
+    const p=await apiGet(id);
+    applyConfig(p.config||{});
+    S.projectId=p.id; $('projName').value=p.name;
+    projStatus(`Loaded “${p.name}”.`); refreshProjects();
+  }catch(e){ projStatus('Load failed: '+e.message,'err'); }
+}
+async function deleteProject(id){
+  if(!confirm('Delete this project?'))return;
+  try{
+    await apiDelete(id);
+    if(S.projectId===id)S.projectId=null;
+    projStatus('Deleted.'); refreshProjects();
+  }catch(e){ projStatus('Delete failed: '+e.message,'err'); }
+}
+
+/* ======================================================================== *
+ *  FILE LOADING (STL / glTF) + DRAG-DROP
+ * ======================================================================== */
+function loadArrayBuffer(buf,name){
+  const ext=name.toLowerCase().split('.').pop();
+  try{
+    if(ext==='stl'){
+      const g=new STLLoader().parse(buf);
+      setBaseGeometry(g);
+    }else if(ext==='glb'||ext==='gltf'){
+      const scale=+$('unitScale').value||1;
+      new GLTFLoader().parse(buf,'',(gltf)=>{
+        const geos=[];
+        gltf.scene.updateMatrixWorld(true);
+        gltf.scene.traverse(o=>{
+          if(o.isMesh){const g=o.geometry.clone();g.applyMatrix4(o.matrixWorld);
+            ['uv','uv2','color'].forEach(a=>g.deleteAttribute(a)); geos.push(g);}
+        });
+        if(!geos.length){status('glTF has no meshes.','err');return;}
+        let g=geos.length>1?BufferGeometryUtils.mergeGeometries(geos,false):geos[0];
+        if(scale!==1)g.scale(scale,scale,scale);
+        setBaseGeometry(g);
+      },(err)=>status('glTF parse error: '+err,'err'));
+    }else status('Unsupported file type.','err');
+  }catch(e){status('Load error: '+e.message,'err');}
+}
+function loadFile(file){
+  status('Loading '+file.name+'…');
+  const r=new FileReader();
+  r.onload=()=>loadArrayBuffer(r.result,file.name);
+  r.readAsArrayBuffer(file);
+}
+
+const drop=$('drop');
+['dragenter','dragover'].forEach(t=>view().addEventListener(t,e=>{e.preventDefault();drop.classList.remove('hide');drop.classList.add('hot');}));
+['dragleave','drop'].forEach(t=>view().addEventListener(t,e=>{e.preventDefault();drop.classList.remove('hot');if(t==='drop'||e.target===drop)maybeHide();}));
+view().addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)loadFile(f);});
+function view(){return document.getElementById('view');}
+function maybeHide(){ if(S.baseGeo) drop.classList.add('hide'); }
+
+/* ======================================================================== *
+ *  WIZARD GATING + EVENT WIRING
+ * ======================================================================== */
+function openStep(id){
+  document.querySelectorAll('.step').forEach(s=>{s.classList.remove('open','active');});
+  const s=$(id); s.classList.add('open','active');
+}
+function unlock(id){ $(id).classList.remove('locked'); }
+function markDone(id){ $(id).classList.add('done'); }
+
+document.querySelectorAll('.step .head').forEach(h=>{
+  h.addEventListener('click',()=>{const s=h.parentElement; if(s.classList.contains('locked'))return;
+    const wasOpen=s.classList.contains('open');
+    document.querySelectorAll('.step').forEach(x=>x.classList.remove('open'));
+    if(!wasOpen)s.classList.add('open');});
+});
+
+/* ---- arm helper for click-modes ---- */
+function setArm(mode,labelId){
+  // clear all armed pills
+  ['pickFaceArmed','placePinArmed','placeHoleArmed'].forEach(i=>$(i).innerHTML='');
+  if(arm===mode){arm=null;return;}
+  arm=mode;
+  if(labelId)$(labelId).innerHTML='<span class="pill armed">click…</span>';
+}
+
+/* STEP 1 wiring */
+$('fileBtn').onclick=()=>$('fileInput').click();
+$('fileInput').onchange=e=>{if(e.target.files[0])loadFile(e.target.files[0]);};
+$('autoAlign').onclick=autoAlign;
+$('rotX').onclick=()=>nudge('x');$('rotY').onclick=()=>nudge('y');$('rotZ').onclick=()=>nudge('z');
+$('pickFace').onclick=()=>setArm('pickFace','pickFaceArmed');
+$('layFlat').onclick=layFlat;
+$('alignZ').onclick=()=>{alignInPlane();S.partZ=0;$('partZ').value=0;$('partZR').value=0;frameCamera();status('Auto-rotated: longest axis on X.','ok');};
+$('findSym').onclick=detectSymmetry;
+/* free part rotation about Z — bake the DELTA so geometry stays the single source
+   of truth, and carry the anchor points along so the cylinders track the part. */
+function rotatePartZ(deg){
+  if(!S.baseGeo)return;
+  const delta=THREE.MathUtils.degToRad(deg-S.partZ); S.partZ=deg;
+  bakeMatrix(new THREE.Matrix4().makeRotationZ(delta));   // also rotates sym lines
+  const c=Math.cos(delta),s=Math.sin(delta);
+  for(const a of [S.pin,S.hole]){const x=a.x,y=a.y; a.x=c*x-s*y; a.y=s*x+c*y;}
+  syncGizmos(); syncAnchorInputs();
+}
+$('partZ').oninput =()=>{$('partZR').value=$('partZ').value; rotatePartZ(+$('partZ').value);};
+$('partZR').oninput=()=>{$('partZ').value=$('partZR').value; rotatePartZ(+$('partZR').value);};
+$('toggleSym').onclick=()=>{S.symVisible=!S.symVisible; if(S.symGroup)S.symGroup.visible=S.symVisible;};
+$('s1next').onclick=()=>{
+  if(!S.baseGeo)return;
+  // seed anchors to sensible spots if untouched
+  const b=S.baseGeo.boundingBox;
+  if(S.pin.x===0&&S.pin.y===0&&S.hole.x===0&&S.hole.y===0){
+    S.pin={x:b.max.x*0.7,y:0}; S.hole={x:b.min.x*0.7,y:0};   // seed near the two ends
+  }
+  markDone('s1'); unlock('s2'); openStep('s2'); $('s2').classList.add('active');
+  buildGizmos(); syncAnchorInputs();
+  if(S.partMesh)S.partMesh.visible=true;
+  if(S.symGroup)S.symGroup.visible=S.symVisible;     // keep mirror lines visible as anchor guides
+  status('Place the pin and hole anchors on the part.');
+};
+
+/* STEP 2 wiring */
+$('placePin').onclick =()=>setArm('placePin','placePinArmed');
+$('placeHole').onclick=()=>setArm('placeHole','placeHoleArmed');
+['pinX','pinY','holeX','holeY'].forEach(id=>{
+  $(id).oninput=()=>{
+    S.pin={x:+$('pinX').value,y:+$('pinY').value};
+    S.hole={x:+$('holeX').value,y:+$('holeY').value};
+    syncGizmos(); $('s2next').disabled=!anchorsValid();
+  };
+});
+$('s2next').onclick=()=>{
+  if(!anchorsValid())return;
+  markDone('s2'); unlock('s3'); openStep('s3'); $('s3').classList.add('active');
+  syncRanges(); regen();
+};
+
+/* STEP 3 wiring — keep number + range inputs in sync, debounce regen */
+function syncRanges(){
+  [['count','countR'],['startR','startRR'],['spacing','spacingR']].forEach(([n,r])=>{$(r).value=$(n).value;});
+}
+[['count','countR'],['startR','startRR'],['spacing','spacingR']].forEach(([n,r])=>{
+  $(n).oninput=()=>{$(r).value=$(n).value; debounceRegen();};
+  $(r).oninput=()=>{$(n).value=$(r).value; debounceRegen();};
+});
+$('plate').oninput=debounceRegen;
+function debounceRegen(){clearTimeout(regenTimer);regenTimer=setTimeout(regen,80);}
+$('recheck').onclick=()=>regen(true);
+$('s3next').onclick=()=>{ markDone('s3'); unlock('s4'); openStep('s4'); $('s4').classList.add('active');
+  status('Ready to export.','ok'); };
+
+/* STEP 4 wiring */
+$('exportStl').onclick=exportSTL;
+$('saveCfg').onclick=saveCfg;
+$('loadCfg').onclick=()=>$('cfgInput').click();
+$('cfgInput').onchange=e=>{if(e.target.files[0])loadCfg(e.target.files[0]);};
+
+/* PROJECTS wiring */
+$('projSaveNew').onclick=saveNewProject;
+$('projUpdate').onclick=updateCurrentProject;
+$('projRefresh').onclick=refreshProjects;
+$('projList').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-act]'); if(!b)return;
+  if(b.dataset.act==='load')loadProject(b.dataset.id);
+  if(b.dataset.act==='del')deleteProject(b.dataset.id);
+});
+refreshProjects();
+
+/* ---- viewport click router for armed modes ---- */
+renderer.domElement.addEventListener('pointerdown',ev=>{
+  if(!arm||ev.button!==0)return;
+  const hit=rayPart(ev);
+  if(arm==='pickFace'){ if(hit)pickFace(hit); setArm(null); return; }
+  // anchor modes need a surface point projected to XY (z=0)
+  let pt;
+  if(hit) pt=hit.point;
+  else { // fall back to intersection with the Z=0 plane
+    const plane=new THREE.Plane(new THREE.Vector3(0,0,1),0); pt=new THREE.Vector3();
+    if(!raycaster.ray.intersectPlane(plane,pt))return;
+  }
+  if(arm==='placePin'){ S.pin.x=+pt.x.toFixed(2);S.pin.y=+pt.y.toFixed(2); }
+  if(arm==='placeHole'){ S.hole.x=+pt.x.toFixed(2);S.hole.y=+pt.y.toFixed(2); }
+  syncGizmos(); syncAnchorInputs();
+  $('s2next').disabled=!anchorsValid();
+  setArm(null);
+});
+
+/* ---- small format helpers ---- */
+function fmtV(v){return `${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)}`;}
+
+status('Drop a part or use “Choose file…”.');
+</script>
+</body>
+</html>
