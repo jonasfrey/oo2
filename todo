@@ -8,3 +8,25 @@ pin and hole testing
 ---
 its a crucial step to find out the correct position of pin and hole in order to position the limbs so that they dont topuch each other. 
 in the mark pin and hole step, please visualize a chain with two parts. so that i have quick visual feedback if the parts overlap / touch each other or not. 
+
+
+pin and hole x y 
+---
+allow 0.1 mm steps
+
+
+x-ray 
+--- 
+render the parts semi transparent with outlines if possible
+
+
+help visualize touching sections
+---
+one idea is:
+layer view / section view 
+allow me to go throught 'z layers' and have a kind of section view. to see where parts could be touching
+
+
+
+fixes: 
+loading a project does work but the result is horrible looking geometry. 
