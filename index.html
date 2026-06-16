@@ -62,6 +62,10 @@
   .chip{background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:20px;
     padding:5px 11px;font-size:12px;backdrop-filter:blur(4px)}
   .chip b{color:var(--ink)} .chip .ok{color:var(--accent2)} .chip .err{color:var(--bad)} .chip .warn{color:var(--warn)}
+  #viewbtns{position:absolute;right:14px;top:12px;z-index:4;display:flex;gap:4px}
+  #viewbtns button{background:rgba(22,27,34,.9);color:var(--ink);border:1px solid var(--line);
+    border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600;backdrop-filter:blur(4px)}
+  #viewbtns button:hover{border-color:var(--accent);color:var(--accent)}
   #status{position:absolute;left:14px;bottom:12px;z-index:4;font-size:12px;color:var(--muted);
     background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:8px;padding:6px 10px;max-width:80%}
   #status.err{color:var(--bad);border-color:var(--bad)}
@@ -69,6 +73,11 @@
   .swatch{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px}
   a.link{color:var(--accent);cursor:pointer;text-decoration:underline}
   .grp{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}
+  code{background:#0c1117;border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px}
+  #scaleEditor{height:150px;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin-top:4px}
+  .rngrow{display:flex;align-items:center;gap:8px;margin-top:4px}
+  .rnglbl{font-size:11px;color:var(--muted);width:12px;text-align:center;font-weight:600}
+  .rngrow input[type=range]{flex:1}
   #projList{display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:200px;overflow:auto}
   .projrow{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--line);
     border-radius:7px;background:#0c1117}
@@ -159,12 +168,16 @@
             <div class="btnrow"><button id="placePin" class="ghost tiny">Click part to place pin <span id="placePinArmed"></span></button></div>
             <div class="row"><label>x / y (mm)</label>
               <input id="pinX" type="number" step="0.5" value="0"><input id="pinY" type="number" step="0.5" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="pinXR" type="range" step="0.5"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="pinYR" type="range" step="0.5"></div>
           </div>
           <div class="grp">
             <h4>Hole location</h4>
             <div class="btnrow"><button id="placeHole" class="ghost tiny">Click part to place hole <span id="placeHoleArmed"></span></button></div>
             <div class="row"><label>x / y (mm)</label>
               <input id="holeX" type="number" step="0.5" value="0"><input id="holeY" type="number" step="0.5" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="holeXR" type="range" step="0.5"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="holeYR" type="range" step="0.5"></div>
           </div>
           <p class="hint" id="anchorWarn"></p>
           <div class="row" style="margin-top:6px"><button id="s2next" disabled>Build chain →</button></div>
@@ -182,6 +195,25 @@
           <div class="row col"><div class="row" style="margin:0"><label>Loop spacing (mm/turn)</label><input id="spacing" type="number" step="0.5" value="16"></div>
             <input id="spacingR" type="range" min="2" max="60" step="0.5" value="16"></div>
           <p class="hint">Archimedean spiral <b>r = a + bθ</b>. Start radius <b>a</b> is the innermost radius (offset so it doesn't start at the centre). Loop spacing is the radial gap between successive turns — keep it bigger than the part width so loops don't collide.</p>
+          <div class="grp">
+            <h4>Joint anchors (live)</h4>
+            <p class="hint">Nudge the <span class="swatch" style="background:var(--pin)"></span>pin / <span class="swatch" style="background:var(--hole)"></span>hole to retune link pitch &amp; body offset until overlaps (red) clear — the chain re-lays as you type.</p>
+            <div class="row"><label>pin x / y (mm)</label>
+              <input id="s3pinX" type="number" step="0.5" value="0"><input id="s3pinY" type="number" step="0.5" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="s3pinXR" type="range" step="0.5"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="s3pinYR" type="range" step="0.5"></div>
+            <div class="row"><label>hole x / y (mm)</label>
+              <input id="s3holeX" type="number" step="0.5" value="0"><input id="s3holeY" type="number" step="0.5" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="s3holeXR" type="range" step="0.5"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="s3holeYR" type="range" step="0.5"></div>
+          </div>
+          <div class="grp">
+            <h4>Size variation (per part)</h4>
+            <p class="hint">JS <code>f(n_it, n_it_nor) → scale</code>. <code>n_it</code> = part index, <code>n_it_nor</code> = that index normalized to 0–1. Edits apply live; the chain re-spaces so joints still mate. <code>1</code> = original size.</p>
+            <div id="scaleEditor"></div>
+            <div class="btnrow" style="margin-top:6px"><button id="scaleReset" class="ghost tiny">Reset to default</button></div>
+            <p class="hint" id="scaleErr"></p>
+          </div>
           <div class="row"><label>Plate size (mm, square)</label><input id="plate" type="number" step="10" value="220"></div>
           <div class="btnrow" style="margin-top:6px"><button id="recheck" class="ghost tiny">Re-check collisions</button></div>
           <p class="hint" id="solveOut"></p>
@@ -214,6 +246,12 @@
       <div class="chip" id="chipSize"></div>
       <div class="chip" id="chipCollide"></div>
     </div>
+    <div id="viewbtns">
+      <button id="viewIso"   title="Isometric">Iso</button>
+      <button id="viewTop"   title="Top (down +Z)">Top</button>
+      <button id="viewFront" title="Front (along +Y)">Front</button>
+      <button id="viewSide"  title="Side (along +X)">Side</button>
+    </div>
     <div id="status">Load a part to begin.</div>
     <div id="drop"><div class="inner">
       <div style="font-size:30px">⬇</div>
@@ -232,6 +270,17 @@
     "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.4/build/index.module.js"
   }
 }
+</script>
+
+<!-- Monaco editor (AMD loader) — exposes window.monacoReady, resolved once loaded -->
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+<script>
+  window.monacoReady = new Promise((resolve,reject)=>{
+    try{
+      require.config({ paths:{ vs:'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' }});
+      require(['vs/editor/editor.main'], ()=>resolve(window.monaco), reject);
+    }catch(e){ reject(e); }
+  });
 </script>
 
 <script type="module">
@@ -323,6 +372,9 @@ const S = {
   symGroup:null,         // THREE.Group holding the mirror-line visuals
   symVisible:true,
   projectId:null,        // currently-loaded server project (null = unsaved)
+  scaleCode:'',          // user JS for per-part size variation
+  scaleFn:(n,t)=>1,      // compiled scale function f(n_it, n_it_nor) → scale
+  scales:[],             // per-link scale actually used (for status/debug)
 };
 let arm = null;          // current armed click-mode: 'pickFace','placePin','placeHole'
 
@@ -353,6 +405,7 @@ function setBaseGeometry(geo){
   frameCamera();
   updateMeshChips();
   $('s1next').disabled=false;
+  drop.classList.add('hide');               // load done → drop the overlay (async, so can't rely on maybeHide at drop time)
   status('Part loaded. Auto-align, then pick the face to lay flat.','ok');
 }
 
@@ -370,6 +423,32 @@ function frameCamera(){
   controls.target.set(0,0,r*0.3);
   camera.position.set(r*2.2,-r*2.8,r*2.4);
   camera.near=r/100; camera.far=r*200; camera.updateProjectionMatrix();
+}
+
+/* Bounds of whatever is currently on screen (chain if built, else the part). */
+function contentBounds(){
+  const box=new THREE.Box3();
+  if(S.chain&&S.chain.visible){ box.setFromObject(S.chain); }
+  else if(S.baseGeo){ S.baseGeo.computeBoundingBox(); box.copy(S.baseGeo.boundingBox); }
+  else { box.set(new THREE.Vector3(-60,-60,0),new THREE.Vector3(60,60,60)); }
+  return { center:box.getCenter(new THREE.Vector3()),
+           radius:(box.getSize(new THREE.Vector3()).length()/2)||60 };
+}
+/* Snap the camera to an axis-aligned preset (Z-up scene). Top is nudged a hair
+   off the Z axis so the up-vector doesn't go singular when looking straight down. */
+function setView(name){
+  const {center,radius}=contentBounds();
+  const d=radius*3.0;
+  const off={
+    iso  :[d*0.62,-d*0.78,d*0.66],
+    top  :[0,-radius*0.001, d],
+    front:[0,-d,0],
+    side :[d,0,0],
+  }[name] || [d*0.62,-d*0.78,d*0.66];
+  controls.target.copy(center);
+  camera.position.set(center.x+off[0], center.y+off[1], center.z+off[2]);
+  camera.near=Math.max(0.1,radius/100); camera.far=radius*200; camera.updateProjectionMatrix();
+  controls.update();
 }
 
 /* ----- Bake an arbitrary Matrix4 into the base geometry (keeps mesh xform = I) ----- */
@@ -667,6 +746,28 @@ function syncGizmos(){
 function syncAnchorInputs(){
   $('pinX').value=S.pin.x.toFixed(1);$('pinY').value=S.pin.y.toFixed(1);
   $('holeX').value=S.hole.x.toFixed(1);$('holeY').value=S.hole.y.toFixed(1);
+  // mirror into the step-3 "live" anchor fields so both panels stay consistent
+  $('s3pinX').value=S.pin.x.toFixed(1);$('s3pinY').value=S.pin.y.toFixed(1);
+  $('s3holeX').value=S.hole.x.toFixed(1);$('s3holeY').value=S.hole.y.toFixed(1);
+  syncAnchorSliders();
+}
+/* Sliders carry the raw value (no reformatting) in both the step-2 and step-3 panels. */
+function syncAnchorSliders(){
+  $('pinXR').value=$('s3pinXR').value=S.pin.x;  $('pinYR').value=$('s3pinYR').value=S.pin.y;
+  $('holeXR').value=$('s3holeXR').value=S.hole.x;$('holeYR').value=$('s3holeYR').value=S.hole.y;
+}
+/* Bound the anchor sliders to the part's footprint (+30% margin) so a full drag
+   sweeps the whole part and a little beyond. */
+function setAnchorRanges(){
+  if(!S.baseGeo) return;
+  S.baseGeo.computeBoundingBox();
+  const b=S.baseGeo.boundingBox;
+  const padX=Math.max(2,(b.max.x-b.min.x)*0.3), padY=Math.max(2,(b.max.y-b.min.y)*0.3);
+  const xmin=+(b.min.x-padX).toFixed(1), xmax=+(b.max.x+padX).toFixed(1);
+  const ymin=+(b.min.y-padY).toFixed(1), ymax=+(b.max.y+padY).toFixed(1);
+  for(const id of ['pinXR','holeXR','s3pinXR','s3holeXR']){ $(id).min=xmin; $(id).max=xmax; }
+  for(const id of ['pinYR','holeYR','s3pinYR','s3holeYR']){ $(id).min=ymin; $(id).max=ymax; }
+  syncAnchorSliders();
 }
 function anchorsValid(){
   const dist=Math.hypot(S.pin.x-S.hole.x,S.pin.y-S.hole.y);
@@ -686,40 +787,97 @@ const P = ()=>({count:+$('count').value, startR:+$('startR').value, spacing:+$('
 /* ARCHIMEDEAN LAYOUT --------------------------------------------------------
    A real chain is a string of rigid links of fixed length d = |pin − hole|,
    joined hole-to-pin. So we place the JOINT points Q_0,Q_1,… on an Archimedean
-   spiral r(θ)=a+bθ with equal CHORD spacing d (not arc length — chord, so the
-   joints meet exactly), then drop each link onto its segment:
-     link i: rotate+translate so local hole→Q_i and local pin→Q_{i+1}.
+   spiral r(θ)=a+bθ, then drop each link onto its segment:
+     link i: rotate+translate (+uniform scale s_i) so local hole→Q_i and pin→Q_{i+1}.
    Because link i's pin and link i+1's hole both land on Q_{i+1}, the mating is
-   preserved exactly. a = start radius offset, b = spacing/2π.                  */
+   preserved exactly. a = start radius offset, b = spacing/2π.
+
+   SIZE VARIATION: a scaled link's hole→pin length becomes s_i·d, so the chord
+   between consecutive joints must also be s_i·d — otherwise the pin would miss
+   the next hole. We therefore walk the spiral with a PER-LINK chord length.    */
 function spiralPoint(a,b,th){ const r=a+b*th; return new THREE.Vector2(r*Math.cos(th),r*Math.sin(th)); }
+/* Evaluate the user's scale function safely; non-finite / ≤0 falls back to 1. */
+function linkScale(i,count){
+  const nor = count>1 ? i/(count-1) : 0;
+  let s; try{ s=S.scaleFn(i,nor); }catch(e){ s=1; }
+  return (typeof s==='number'&&Number.isFinite(s)&&s>0) ? s : 1;
+}
 function buildPoses(){
   const p=P();
   const H=new THREE.Vector2(S.hole.x,S.hole.y), Pp=new THREE.Vector2(S.pin.x,S.pin.y);
   const Vloc=new THREE.Vector2().subVectors(Pp,H);   // local hole→pin
   const d=Vloc.length()||1;
   const a=Math.max(0,p.startR), b=p.spacing/(2*Math.PI);
-  // walk the spiral, each step advancing θ until the chord from the last joint == d
+  const scales=[];
+  for(let i=0;i<p.count;i++) scales.push(linkScale(i,p.count));
+  // walk the spiral, each step advancing θ until the chord from the last joint == s_i·d
   const Q=[spiralPoint(a,b,0)];
   let th=0;
   for(let k=0;k<p.count;k++){
+    const need=scales[k]*d;                          // this link's scaled hole→pin length
     const prev=Q[k];
     const dist=t=>spiralPoint(a,b,t).distanceTo(prev);
-    let lo=th, hi=th + d/Math.max(a+b*th,1) + 0.6;
-    let guard=0; while(dist(hi)<d && guard++<80) hi+=0.6;     // expand until chord ≥ d
-    for(let i=0;i<42;i++){const mid=(lo+hi)/2; if(dist(mid)<d)lo=mid; else hi=mid;}
+    let lo=th, hi=th + need/Math.max(a+b*th,1) + 0.6;
+    let guard=0; while(dist(hi)<need && guard++<200) hi+=0.6;   // expand until chord ≥ need
+    for(let i=0;i<46;i++){const mid=(lo+hi)/2; if(dist(mid)<need)lo=mid; else hi=mid;}
     th=(lo+hi)/2; Q.push(spiralPoint(a,b,th));
   }
   const baseAng=Math.atan2(Vloc.y,Vloc.x);
   const poses=[];
   for(let i=0;i<p.count;i++){
+    const sc=scales[i];
     const seg=new THREE.Vector2().subVectors(Q[i+1],Q[i]);
     const ang=Math.atan2(seg.y,seg.x)-baseAng;       // rotate local spine onto this segment
     const c=Math.cos(ang),s=Math.sin(ang);
+    // world = (R·S)·local + t, with t chosen so (R·S)·hole = Q_i  →  pin lands on Q_{i+1}
     const m=new THREE.Matrix4().makeRotationZ(ang);
-    m.setPosition(Q[i].x-(c*H.x-s*H.y), Q[i].y-(s*H.x+c*H.y), 0);  // t = Q_i − R·hole
+    m.scale(new THREE.Vector3(sc,sc,sc));            // m = R · S (uniform)
+    const lx=sc*(c*H.x-s*H.y), ly=sc*(s*H.x+c*H.y);  // (R·S)·hole
+    m.setPosition(Q[i].x-lx, Q[i].y-ly, 0);
     poses.push(m);
   }
+  S.scales=scales;
   return poses;
+}
+
+/* ---- per-part size variation: user JS compiled to f(n_it, n_it_nor) → scale ---- */
+const DEFAULT_SCALE_CODE =
+`// n_it     – index of this part (0 … count-1)
+// n_it_nor – that index normalized to 0 … 1
+// Return the scale factor for this part (1 = original size).
+const TAU = Math.PI * 2;
+return 1 + Math.sin(n_it_nor * TAU / 2) * 0.05;`;
+
+function compileScaleFn(code){
+  let fn;
+  try{
+    fn = new Function('n_it','n_it_nor', code);   // user's own machine → eval is the feature
+    const t = fn(0, 0);
+    if(typeof t!=='number' || !Number.isFinite(t)) throw new Error('function must return a finite number');
+  }catch(e){ return {err:e.message}; }
+  return {fn};
+}
+/* Recompile from editor text: bad code keeps the last good fn and shows the error. */
+function applyScaleCode(code){
+  S.scaleCode=code;
+  const {fn,err}=compileScaleFn(code), e=$('scaleErr');
+  if(err){ e.textContent='⚠ '+err; e.style.color='var(--bad)'; return; }
+  e.textContent='✓ applied'; e.style.color='var(--accent2)';
+  S.scaleFn=fn; debounceRegen();
+}
+let scaleEditor=null;
+async function ensureScaleEditor(){
+  if(scaleEditor) return;
+  let monaco;
+  try{ monaco=await window.monacoReady; }
+  catch(err){ $('scaleErr').textContent='Monaco failed to load — using the default size function.'; $('scaleErr').style.color='var(--warn)'; return; }
+  scaleEditor=monaco.editor.create($('scaleEditor'),{
+    value:S.scaleCode||DEFAULT_SCALE_CODE,
+    language:'javascript', theme:'vs-dark',
+    minimap:{enabled:false}, fontSize:12, lineNumbers:'on', tabSize:2,
+    scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
+  });
+  scaleEditor.onDidChangeModelContent(()=>applyScaleCode(scaleEditor.getValue()));
 }
 
 /* Render the chain with ONE InstancedMesh (one base geo + N matrices). */
@@ -869,6 +1027,7 @@ function gatherConfig(){
   return {
     version:2, pin:S.pin, hole:S.hole, partZ:S.partZ,
     params:P(),
+    scaleCode:S.scaleCode,
     symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
     geometry:S.baseGeo? Array.from(S.baseGeo.attributes.position.array) : null,
   };
@@ -889,9 +1048,14 @@ function applyConfig(cfg){
     S.symPlanes=cfg.symPlanes.map(pl=>({p:new THREE.Vector3(...pl.p),n:new THREE.Vector3(...pl.n),score:0}));
     buildSymLines();
   }
-  syncRanges(); syncAnchorInputs();
-  markDone('s1'); unlock('s2'); unlock('s3'); buildGizmos();
-  openStep('s3'); regen();
+  if(typeof cfg.scaleCode==='string'){
+    S.scaleCode=cfg.scaleCode;
+    const r=compileScaleFn(cfg.scaleCode); if(r.fn)S.scaleFn=r.fn;
+    if(scaleEditor)scaleEditor.setValue(cfg.scaleCode);
+  }
+  syncRanges(); markDone('s1'); unlock('s2'); unlock('s3'); buildGizmos();
+  setAnchorRanges(); syncAnchorInputs();
+  ensureScaleEditor(); openStep('s3'); regen();
   drop.classList.add('hide');
 }
 function saveCfg(){
@@ -1076,7 +1240,7 @@ $('s1next').onclick=()=>{
     S.pin={x:b.max.x*0.7,y:0}; S.hole={x:b.min.x*0.7,y:0};   // seed near the two ends
   }
   markDone('s1'); unlock('s2'); openStep('s2'); $('s2').classList.add('active');
-  buildGizmos(); syncAnchorInputs();
+  buildGizmos(); setAnchorRanges(); syncAnchorInputs();
   if(S.partMesh)S.partMesh.visible=true;
   if(S.symGroup)S.symGroup.visible=S.symVisible;     // keep mirror lines visible as anchor guides
   status('Place the pin and hole anchors on the part.');
@@ -1089,13 +1253,16 @@ $('placeHole').onclick=()=>setArm('placeHole','placeHoleArmed');
   $(id).oninput=()=>{
     S.pin={x:+$('pinX').value,y:+$('pinY').value};
     S.hole={x:+$('holeX').value,y:+$('holeY').value};
-    syncGizmos(); $('s2next').disabled=!anchorsValid();
+    // mirror raw values into the step-3 fields (don't reformat the one being typed)
+    $('s3pinX').value=$('pinX').value;$('s3pinY').value=$('pinY').value;
+    $('s3holeX').value=$('holeX').value;$('s3holeY').value=$('holeY').value;
+    syncGizmos(); syncAnchorSliders(); $('s2next').disabled=!anchorsValid();
   };
 });
 $('s2next').onclick=()=>{
   if(!anchorsValid())return;
   markDone('s2'); unlock('s3'); openStep('s3'); $('s3').classList.add('active');
-  syncRanges(); regen();
+  ensureScaleEditor(); syncRanges(); regen();
 };
 
 /* STEP 3 wiring — keep number + range inputs in sync, debounce regen */
@@ -1107,7 +1274,33 @@ function syncRanges(){
   $(r).oninput=()=>{$(n).value=$(r).value; debounceRegen();};
 });
 $('plate').oninput=debounceRegen;
+/* live pin/hole tuning while building the chain — update anchors, mirror into the
+   step-2 fields, and re-lay the chain so overlaps recolour as you type. */
+['s3pinX','s3pinY','s3holeX','s3holeY'].forEach(id=>{
+  $(id).oninput=()=>{
+    S.pin={x:+$('s3pinX').value,y:+$('s3pinY').value};
+    S.hole={x:+$('s3holeX').value,y:+$('s3holeY').value};
+    $('pinX').value=$('s3pinX').value;$('pinY').value=$('s3pinY').value;
+    $('holeX').value=$('s3holeX').value;$('holeY').value=$('s3holeY').value;
+    syncGizmos(); syncAnchorSliders();
+    if(anchorsValid()) debounceRegen();
+  };
+});
+/* pin/hole SLIDERS (both panels). Each drives one axis of one anchor; step-3
+   sliders re-lay the chain live, step-2 sliders just move the gizmos. */
+[['pinXR','pin','x',0],['pinYR','pin','y',0],['holeXR','hole','x',0],['holeYR','hole','y',0],
+ ['s3pinXR','pin','x',1],['s3pinYR','pin','y',1],['s3holeXR','hole','x',1],['s3holeYR','hole','y',1]
+].forEach(([id,anchor,axis,live])=>{
+  $(id).oninput=()=>{
+    S[anchor][axis]=+$(id).value;
+    syncGizmos(); syncAnchorInputs(); $('s2next').disabled=!anchorsValid();
+    if(live && anchorsValid()) debounceRegen();
+  };
+});
 function debounceRegen(){clearTimeout(regenTimer);regenTimer=setTimeout(regen,80);}
+/* size-variation editor: seed the default function, wire the reset button */
+S.scaleCode=DEFAULT_SCALE_CODE; S.scaleFn=compileScaleFn(DEFAULT_SCALE_CODE).fn;
+$('scaleReset').onclick=()=>{ if(scaleEditor)scaleEditor.setValue(DEFAULT_SCALE_CODE); else applyScaleCode(DEFAULT_SCALE_CODE); };
 $('recheck').onclick=()=>regen(true);
 $('s3next').onclick=()=>{ markDone('s3'); unlock('s4'); openStep('s4'); $('s4').classList.add('active');
   status('Ready to export.','ok'); };
@@ -1146,6 +1339,54 @@ renderer.domElement.addEventListener('pointerdown',ev=>{
   syncGizmos(); syncAnchorInputs();
   $('s2next').disabled=!anchorsValid();
   setArm(null);
+});
+
+/* ---- preset camera views ---- */
+$('viewIso').onclick  =()=>setView('iso');
+$('viewTop').onclick  =()=>setView('top');
+$('viewFront').onclick=()=>setView('front');
+$('viewSide').onclick =()=>setView('side');
+
+/* ---- drag the pin / hole cylinders directly on the plate (step 2) ----
+   The anchors are plate XY points, so a drag projects the cursor ray onto the
+   Z=0 plane. We grab in the CAPTURE phase on the wrapper and stopPropagation so
+   OrbitControls (which listens on the canvas) never starts a rotate. */
+let dragAnchor=null;
+const _platePlane=new THREE.Plane(new THREE.Vector3(0,0,1),0), _plateHit=new THREE.Vector3();
+function gizmoUnder(ev){
+  if(!pinGizmo||!pinGizmo.visible) return null;
+  pointerNDC(ev);
+  return raycaster.intersectObjects([pinGizmo,holeGizmo],false)[0]||null;
+}
+function plateUnder(ev){
+  pointerNDC(ev);
+  if(!raycaster.ray.intersectPlane(_platePlane,_plateHit)) return null;
+  const {radius}=contentBounds();          // ignore wild hits when the plate is edge-on
+  if(Math.hypot(_plateHit.x,_plateHit.y) > radius*8) return null;
+  return _plateHit;
+}
+wrap.addEventListener('pointerdown',ev=>{
+  if(arm||ev.button!==0) return;
+  const hit=gizmoUnder(ev); if(!hit) return;
+  dragAnchor = hit.object===pinGizmo?'pin':'hole';
+  controls.enabled=false;
+  renderer.domElement.style.cursor='grabbing';
+  ev.stopPropagation(); ev.preventDefault();
+},true);
+window.addEventListener('pointermove',ev=>{
+  if(!dragAnchor){
+    if(!arm){ const h=gizmoUnder(ev); if(pinGizmo&&pinGizmo.visible) renderer.domElement.style.cursor=h?'grab':''; }
+    return;
+  }
+  const pt=plateUnder(ev); if(!pt) return;
+  const a = dragAnchor==='pin'?S.pin:S.hole;
+  a.x=+pt.x.toFixed(2); a.y=+pt.y.toFixed(2);
+  syncGizmos(); syncAnchorInputs();
+  $('s2next').disabled=!anchorsValid();
+});
+window.addEventListener('pointerup',()=>{
+  if(!dragAnchor) return;
+  dragAnchor=null; controls.enabled=true; renderer.domElement.style.cursor='';
 });
 
 /* ---- small format helpers ---- */

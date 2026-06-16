@@ -1,0 +1,10 @@
+simplify model
+---
+before exporting, i want to be able to reduce total vertex count, if possible with a mb calculation. 
+
+
+
+pin and hole testing
+---
+its a crucial step to find out the correct position of pin and hole in order to position the limbs so that they dont topuch each other. 
+in the mark pin and hole step, please visualize a chain with two parts. so that i have quick visual feedback if the parts overlap / touch each other or not. 
