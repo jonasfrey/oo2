@@ -16,6 +16,10 @@ const PORT = Number(Deno.env.get("PORT") ?? 8000);
 const ROOT = new URL("./", import.meta.url);            // dir this file lives in
 const DATA_DIR = new URL("./data/", import.meta.url);
 const DB_FILE = new URL("./data/projects.json", import.meta.url);
+const MESH_DIR = new URL("./data/meshes/", import.meta.url);   // uploaded part meshes
+
+const MESH_EXT = new Set(["stl", "glb", "gltf"]);
+const MAX_MESH_BYTES = 64 * 1024 * 1024;                       // 64 MB upload cap
 
 /* ----------------------------- types ----------------------------- */
 interface Project {
@@ -30,6 +34,7 @@ type DB = Record<string, Project>;
 /* --------------------------- JSON storage ------------------------- */
 async function ensureStore() {
   await Deno.mkdir(DATA_DIR, { recursive: true });
+  await Deno.mkdir(MESH_DIR, { recursive: true });
   try { await Deno.stat(DB_FILE); }
   catch { await Deno.writeTextFile(DB_FILE, "{}\n"); }
 }
@@ -53,7 +58,8 @@ function summarize(p: Project) {
   return {
     id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt,
     links: params.count ?? null,
-    hasGeometry: Array.isArray(cfg.geometry) && cfg.geometry.length > 0,
+    // meshId references an uploaded file in data/meshes/; geometry[] is the legacy inline form
+    hasGeometry: !!cfg.meshId || (Array.isArray(cfg.geometry) && cfg.geometry.length > 0),
   };
 }
 
@@ -85,9 +91,43 @@ async function serveStatic(pathname: string): Promise<Response> {
   }
 }
 
+/* ----------------------- meshes (uploaded parts) ----------------------- */
+// A mesh id is just its on-disk filename: "<uuid>.<ext>". We generate it, so
+// it can't contain path separators — but re-validate on read to be safe.
+async function handleMeshes(req: Request, parts: string[]): Promise<Response> {
+  const id = parts[1];
+
+  // POST /api/meshes  → store raw bytes, return { id, name, url }
+  if (!id) {
+    if (req.method !== "POST") return err("method not allowed", 405);
+    const name = (req.headers.get("x-filename") ?? "part.stl").toString();
+    const ext = name.split(".").pop()?.toLowerCase() ?? "stl";
+    if (!MESH_EXT.has(ext)) return err(`unsupported mesh type: .${ext}`);
+    const bytes = new Uint8Array(await req.arrayBuffer());
+    if (bytes.length === 0) return err("empty upload");
+    if (bytes.length > MAX_MESH_BYTES) return err("mesh too large", 413);
+    const fileId = `${crypto.randomUUID()}.${ext}`;
+    await Deno.writeFile(new URL(fileId, MESH_DIR), bytes);
+    return json({ id: fileId, name, url: `/api/meshes/${fileId}` }, 201);
+  }
+
+  // GET /api/meshes/:id  → serve the stored mesh
+  if (req.method !== "GET") return err("method not allowed", 405);
+  if (id.includes("/") || id.includes("..") || !MESH_EXT.has(id.split(".").pop()!.toLowerCase()))
+    return err("bad mesh id", 400);
+  try {
+    const body = await Deno.readFile(new URL(id, MESH_DIR));
+    const ext = id.split(".").pop()!.toLowerCase();
+    return new Response(body, { headers: { "content-type": MIME[ext] ?? "application/octet-stream" } });
+  } catch {
+    return err("mesh not found", 404);
+  }
+}
+
 /* ------------------------------ API ------------------------------ */
 async function handleApi(req: Request, parts: string[]): Promise<Response> {
   // parts = ["projects"] or ["projects", id]
+  if (parts[0] === "meshes") return await handleMeshes(req, parts);
   if (parts[0] !== "projects") return err("unknown endpoint", 404);
   const id = parts[1];
   const db = await readDB();

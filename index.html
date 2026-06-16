@@ -365,6 +365,9 @@ const S = {
   pin :{x:0,y:0},        // pin  anchor POINT (mm) — no direction needed
   hole:{x:0,y:0},        // hole anchor POINT (mm)
   partZ:0,               // baked-in part rotation about Z (deg)
+  meshId:null,           // server filename of the uploaded (aligned) mesh, if saved
+  meshName:'part',       // original file name (sans extension), used when uploading
+  meshDirty:true,        // geometry changed since last upload → re-upload on save
   poses:[],              // Matrix4 per link (world)
   chain:null,            // InstancedMesh preview
   collideSet:new Set(),  // indices currently colliding
@@ -402,6 +405,7 @@ function setBaseGeometry(geo){
   S.partMesh = new THREE.Mesh(geo, mat);
   scene.add(S.partMesh);
   S.pickedNormal=null; clearHighlight(); clearSymmetry();
+  S.meshDirty=true;                         // geometry changed → upload again on next save
   frameCamera();
   updateMeshChips();
   $('s1next').disabled=false;
@@ -458,6 +462,7 @@ function bakeMatrix(m){
   S.baseGeo.computeBoundingBox(); S.baseGeo.computeBoundingSphere();
   S.baseGeo.disposeBoundsTree?.();              // invalidate BVH; rebuilt lazily
   S.baseGeo.boundsTree=null;
+  S.meshDirty=true;                             // alignment baked in → re-upload on save
   updateMeshChips();
   // mirror planes are stored in geometry coords → carry them through the SAME
   // rigid transform so the lines stay locked to the part as it rotates.
@@ -1023,23 +1028,52 @@ function download(blob,name){
 
 /* Serialize the whole working state into one plain object (used by both the
    JSON download and the server-side projects). */
-function gatherConfig(){
-  return {
-    version:2, pin:S.pin, hole:S.hole, partZ:S.partZ,
+/* Upload the current (aligned) geometry to the server as a binary STL and cache
+   its id. No-ops when nothing changed since the last upload. */
+async function ensureMeshUploaded(){
+  if(!S.baseGeo) return null;
+  if(S.meshId && !S.meshDirty) return S.meshId;
+  const dv=new STLExporter().parse(new THREE.Mesh(S.baseGeo),{binary:true});
+  const res=await fetch('/api/meshes',{method:'POST',
+    headers:{'content-type':'model/stl','x-filename':(S.meshName||'part')+'.stl'},
+    body:dv.buffer ?? dv});
+  if(!res.ok) throw new Error(await res.text());
+  const j=await res.json();
+  S.meshId=j.id; S.meshDirty=false;
+  return S.meshId;
+}
+/* Fetch a previously-uploaded mesh and install it as the base geometry. */
+async function loadMeshFromServer(id){
+  const res=await fetch('/api/meshes/'+encodeURIComponent(id));
+  if(!res.ok) throw new Error('mesh fetch failed ('+res.status+')');
+  setBaseGeometry(new STLLoader().parse(await res.arrayBuffer()));
+}
+
+function gatherConfig(opts={}){
+  const cfg={
+    version:3, pin:S.pin, hole:S.hole, partZ:S.partZ,
     params:P(),
     scaleCode:S.scaleCode,
     symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
-    geometry:S.baseGeo? Array.from(S.baseGeo.attributes.position.array) : null,
+    meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
   };
+  // standalone offline export keeps geometry inline so the file stands alone
+  if(opts.inlineGeometry && S.baseGeo) cfg.geometry=Array.from(S.baseGeo.attributes.position.array);
+  return cfg;
 }
 /* Apply a config object back onto the app. */
-function applyConfig(cfg){
-  if(cfg.geometry){
+async function applyConfig(cfg){
+  if(cfg.meshId){
+    await loadMeshFromServer(cfg.meshId);     // also clears symmetry
+    S.meshId=cfg.meshId;
+  }else if(cfg.geometry){                     // legacy: geometry embedded in the JSON
     const g=new THREE.BufferGeometry();
     g.setAttribute('position',new THREE.Float32BufferAttribute(cfg.geometry,3));
     g.computeVertexNormals();
-    setBaseGeometry(g);                       // also clears symmetry
+    setBaseGeometry(g);
+    S.meshId=null;
   }
+  S.meshDirty=false;                          // whatever we just loaded is the current saved mesh
   Object.assign(S.pin,cfg.pin); Object.assign(S.hole,cfg.hole);
   S.partZ=cfg.partZ||0; $('partZ').value=S.partZ; $('partZR').value=S.partZ;
   const p=cfg.params||{};
@@ -1058,14 +1092,22 @@ function applyConfig(cfg){
   ensureScaleEditor(); openStep('s3'); regen();
   drop.classList.add('hide');
 }
-function saveCfg(){
-  download(new Blob([JSON.stringify(gatherConfig())],{type:'application/json'}),'spiral_config.json');
-  status('Config saved (anchors + sliders + aligned geometry).','ok');
+async function saveCfg(){
+  let cfg;
+  if(hasServer){
+    try{ await ensureMeshUploaded(); }
+    catch(e){ status('Mesh upload failed: '+e.message,'err'); return; }
+    cfg=gatherConfig();                       // references the server mesh
+  }else{
+    cfg=gatherConfig({inlineGeometry:true});  // no server → keep the file self-contained
+  }
+  download(new Blob([JSON.stringify(cfg)],{type:'application/json'}),'spiral_config.json');
+  status(hasServer?'Config saved (references the uploaded mesh).':'Config saved (geometry inline).','ok');
 }
 function loadCfg(file){
   const r=new FileReader();
-  r.onload=()=>{
-    try{ applyConfig(JSON.parse(r.result)); status('Config loaded.','ok'); }
+  r.onload=async()=>{
+    try{ await applyConfig(JSON.parse(r.result)); status('Config loaded.','ok'); }
     catch(e){status('Bad config file: '+e.message,'err');}
   };
   r.readAsText(file);
@@ -1113,6 +1155,7 @@ async function saveNewProject(){
   if(!S.baseGeo)return projStatus('Load a part first.','err');
   const name=($('projName').value||'').trim()||`spiral ${new Date().toLocaleString()}`;
   try{
+    await ensureMeshUploaded();
     const p=await apiCreate(name,gatherConfig());
     S.projectId=p.id; $('projName').value='';
     projStatus(`Saved “${p.name}”.`); refreshProjects();
@@ -1122,6 +1165,7 @@ async function updateCurrentProject(){
   if(!hasServer)return projStatus('Server not running.','err');
   if(!S.projectId)return projStatus('No project loaded — use “Save as new”.','err');
   try{
+    await ensureMeshUploaded();
     const name=($('projName').value||'').trim();
     const p=await apiUpdate(S.projectId,{name:name||undefined,config:gatherConfig()});
     projStatus(`Updated “${p.name}”.`); refreshProjects();
@@ -1130,7 +1174,7 @@ async function updateCurrentProject(){
 async function loadProject(id){
   try{
     const p=await apiGet(id);
-    applyConfig(p.config||{});
+    await applyConfig(p.config||{});
     S.projectId=p.id; $('projName').value=p.name;
     projStatus(`Loaded “${p.name}”.`); refreshProjects();
   }catch(e){ projStatus('Load failed: '+e.message,'err'); }
@@ -1149,6 +1193,8 @@ async function deleteProject(id){
  * ======================================================================== */
 function loadArrayBuffer(buf,name){
   const ext=name.toLowerCase().split('.').pop();
+  S.meshName=name.replace(/\.[^.]+$/,'')||'part';   // remember for the upload filename
+  S.meshId=null;                                     // a fresh file supersedes any saved mesh
   try{
     if(ext==='stl'){
       const g=new STLLoader().parse(buf);

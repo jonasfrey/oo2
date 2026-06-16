@@ -1,0 +1,3 @@
+# Runtime data — not source. Holds saved projects (data/projects.json)
+# and uploaded part meshes (data/meshes/*.stl). Both are generated at runtime.
+data/
