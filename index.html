@@ -9,7 +9,7 @@
   :root{
     --bg:#0e1116; --panel:#161b22; --panel2:#1d2530; --line:#2b3441;
     --ink:#e6edf3; --muted:#8b97a6; --accent:#4cc2ff; --accent2:#7ee787;
-    --bad:#ff6b6b; --warn:#ffcc66; --pin:#ff5d5d; --hole:#5db0ff;
+    --bad:#ff6b6b; --warn:#ffcc66; --pin:#ff5d5d; --hole:#5db0ff; --mate:#ffb454;
     --radius:10px;
   }
   *{box-sizing:border-box}
@@ -43,6 +43,7 @@
   button{background:var(--accent);color:#04263a;border:0;border-radius:7px;padding:8px 10px;
     font-weight:600;font-size:12px;cursor:pointer}
   button.ghost{background:#21303d;color:var(--ink)}
+  button.ghost.on{background:var(--accent);color:#04263a}
   button.tiny{padding:4px 7px;font-size:11px}
   button:disabled{opacity:.4;cursor:not-allowed}
   .btnrow{display:flex;gap:6px;flex-wrap:wrap}
@@ -66,6 +67,17 @@
   #viewbtns button{background:rgba(22,27,34,.9);color:var(--ink);border:1px solid var(--line);
     border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600;backdrop-filter:blur(4px)}
   #viewbtns button:hover{border-color:var(--accent);color:var(--accent)}
+  #renderbtns{position:absolute;right:14px;top:46px;z-index:4;display:flex;gap:4px}
+  #renderbtns button{background:rgba(22,27,34,.9);color:var(--ink);border:1px solid var(--line);
+    border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600;backdrop-filter:blur(4px)}
+  #renderbtns button:hover{border-color:var(--accent);color:var(--accent)}
+  #renderbtns button.on{background:var(--accent);color:#04263a;border-color:var(--accent)}
+  #sectionBar{position:absolute;right:14px;top:80px;z-index:4;display:flex;align-items:center;gap:8px;
+    background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:8px;padding:6px 10px;
+    backdrop-filter:blur(4px);width:220px}
+  #sectionBar.hide{display:none}
+  #sectionBar input[type=range]{flex:1}
+  #sectionBar .rnglbl{font-size:11px;color:var(--muted);font-weight:600}
   #status{position:absolute;left:14px;bottom:12px;z-index:4;font-size:12px;color:var(--muted);
     background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:8px;padding:6px 10px;max-width:80%}
   #status.err{color:var(--bad);border-color:var(--bad)}
@@ -152,6 +164,26 @@
             <p class="hint">Detects the part's vertical mirror planes (<span class="swatch" style="background:#ff3df0"></span>magenta lines). Lay flat first for best results — lines follow every rotation.</p>
             <p class="hint" id="symOut"></p>
           </div>
+          <div class="grp">
+            <h4>Simplify model</h4>
+            <p class="hint">Reduce the part <i>now</i>, before building the chain — a heavy part × many links can exhaust memory. The cap is per link; the estimate shows the whole chain.</p>
+            <div class="row" style="margin:6px 0"><label style="flex:1"><input type="checkbox" id="simAuto" checked style="width:auto;vertical-align:middle;margin-right:5px">Auto-simplify to ≤</label><input id="simMaxVerts" type="number" min="50" step="250" value="2000"><span class="rnglbl" style="width:auto">verts/link</span></div>
+            <div class="row col"><div class="row" style="margin:0"><label>Reduction</label><input id="simPct" type="number" min="0" max="99" step="5" value="0"><span class="rnglbl" style="width:auto">%</span></div>
+              <input id="simPctR" type="range" min="0" max="99" step="1" value="0"></div>
+            <p class="hint" id="simEst"></p>
+            <div class="btnrow">
+              <button id="simApply" class="ghost tiny">Apply now</button>
+              <button id="simReset" class="ghost tiny" disabled>Restore full detail</button>
+            </div>
+          </div>
+          <div class="grp">
+            <h4>Inspect geometry (debug)</h4>
+            <div class="btnrow">
+              <button id="dbgVerts" class="ghost tiny">Vertices</button>
+              <button id="dbgWire" class="ghost tiny">Wireframe</button>
+            </div>
+            <p class="hint" id="dbgOut">Load a part to see its vertex / triangle count.</p>
+          </div>
           <div class="row" style="margin-top:10px"><button id="s1next" disabled>Confirm orientation →</button></div>
         </div>
       </section>
@@ -167,17 +199,23 @@
             <h4>Pin location</h4>
             <div class="btnrow"><button id="placePin" class="ghost tiny">Click part to place pin <span id="placePinArmed"></span></button></div>
             <div class="row"><label>x / y (mm)</label>
-              <input id="pinX" type="number" step="0.5" value="0"><input id="pinY" type="number" step="0.5" value="0"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input id="pinXR" type="range" step="0.5"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input id="pinYR" type="range" step="0.5"></div>
+              <input id="pinX" type="number" step="0.1" value="0"><input id="pinY" type="number" step="0.1" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="pinXR" type="range" step="0.1"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="pinYR" type="range" step="0.1"></div>
           </div>
           <div class="grp">
             <h4>Hole location</h4>
             <div class="btnrow"><button id="placeHole" class="ghost tiny">Click part to place hole <span id="placeHoleArmed"></span></button></div>
             <div class="row"><label>x / y (mm)</label>
-              <input id="holeX" type="number" step="0.5" value="0"><input id="holeY" type="number" step="0.5" value="0"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input id="holeXR" type="range" step="0.5"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input id="holeYR" type="range" step="0.5"></div>
+              <input id="holeX" type="number" step="0.1" value="0"><input id="holeY" type="number" step="0.1" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="holeXR" type="range" step="0.1"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="holeYR" type="range" step="0.1"></div>
+          </div>
+          <div class="grp">
+            <h4>Mating test</h4>
+            <p class="hint">A ghost of the <span class="swatch" style="background:var(--mate)"></span>neighbouring link is placed so its <b>hole sits on this part's pin</b>. Tune pin &amp; hole until it clears (green) — that's the tightest spot two links share.</p>
+            <div class="btnrow"><button id="toggleMate" class="ghost tiny on">◧ Show mated neighbour</button></div>
+            <p class="hint" id="mateOut"></p>
           </div>
           <p class="hint" id="anchorWarn"></p>
           <div class="row" style="margin-top:6px"><button id="s2next" disabled>Build chain →</button></div>
@@ -199,13 +237,13 @@
             <h4>Joint anchors (live)</h4>
             <p class="hint">Nudge the <span class="swatch" style="background:var(--pin)"></span>pin / <span class="swatch" style="background:var(--hole)"></span>hole to retune link pitch &amp; body offset until overlaps (red) clear — the chain re-lays as you type.</p>
             <div class="row"><label>pin x / y (mm)</label>
-              <input id="s3pinX" type="number" step="0.5" value="0"><input id="s3pinY" type="number" step="0.5" value="0"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input id="s3pinXR" type="range" step="0.5"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input id="s3pinYR" type="range" step="0.5"></div>
+              <input id="s3pinX" type="number" step="0.1" value="0"><input id="s3pinY" type="number" step="0.1" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="s3pinXR" type="range" step="0.1"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="s3pinYR" type="range" step="0.1"></div>
             <div class="row"><label>hole x / y (mm)</label>
-              <input id="s3holeX" type="number" step="0.5" value="0"><input id="s3holeY" type="number" step="0.5" value="0"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input id="s3holeXR" type="range" step="0.5"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input id="s3holeYR" type="range" step="0.5"></div>
+              <input id="s3holeX" type="number" step="0.1" value="0"><input id="s3holeY" type="number" step="0.1" value="0"></div>
+            <div class="rngrow"><span class="rnglbl">X</span><input id="s3holeXR" type="range" step="0.1"></div>
+            <div class="rngrow"><span class="rnglbl">Y</span><input id="s3holeYR" type="range" step="0.1"></div>
           </div>
           <div class="grp">
             <h4>Size variation (per part)</h4>
@@ -226,6 +264,18 @@
         <div class="head"><span class="num">4</span> Export</div>
         <div class="body">
           <p class="hint">All links merge into one mesh as separate, non-touching solids — a print-in-place articulated chain.</p>
+          <div class="grp">
+            <h4>Swap individual links</h4>
+            <p class="hint">Replace any one link with a different model (e.g. a clasp or charm). It's fitted into that link's slot — give your model a matching pin/hole so it still interlocks, and use X-ray / Section / collision colours to check.</p>
+            <div class="btnrow"><button id="pickLink" class="ghost tiny">Select link in viewport <span id="pickLinkArmed"></span></button></div>
+            <p class="hint" id="swapSel">No link selected — click “Select link in viewport”, then a link.</p>
+            <div class="btnrow">
+              <button id="swapFileBtn" class="ghost tiny" disabled>Replace with model…</button>
+              <button id="swapClear" class="ghost tiny" disabled>Revert to base</button>
+              <button id="swapClearAll" class="ghost tiny" disabled>Revert all</button>
+            </div>
+            <input id="swapFileInput" type="file" accept=".stl,.glb,.gltf" hidden>
+          </div>
           <div class="btnrow">
             <button id="exportStl">⬇ Download STL</button>
             <button id="saveCfg" class="ghost">Save config (JSON)</button>
@@ -251,6 +301,15 @@
       <button id="viewTop"   title="Top (down +Z)">Top</button>
       <button id="viewFront" title="Front (along +Y)">Front</button>
       <button id="viewSide"  title="Side (along +X)">Side</button>
+    </div>
+    <div id="renderbtns">
+      <button id="viewXray"    title="X-ray: semi-transparent parts + outlines">X-ray</button>
+      <button id="viewSection" title="Section / layer view: sweep a cut plane down through Z">Section</button>
+    </div>
+    <div id="sectionBar" class="hide">
+      <span class="rnglbl">Z cut</span>
+      <input id="sectionZ" type="range" min="0" max="100" step="0.5" value="100">
+      <span id="sectionZval" class="rnglbl"></span>
     </div>
     <div id="status">Load a part to begin.</div>
     <div id="drop"><div class="inner">
@@ -289,6 +348,7 @@ import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
 import { STLLoader }       from 'three/addons/loaders/STLLoader.js';
 import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
 import { STLExporter }     from 'three/addons/exporters/STLExporter.js';
+import { GLTFExporter }    from 'three/addons/exporters/GLTFExporter.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, MeshBVH }
   from 'three-mesh-bvh';
@@ -311,12 +371,22 @@ const CONST = {
   LINK_SEED_COLOR     : new THREE.Color(0x4cc2ff),
   BBOX_PAD_MM         : 0.05,   // broadphase padding so "just touching" counts as a hit
   COLLISION_AUTO_MAX  : 400,    // above this link count, only check collisions on demand
+  XRAY_OPACITY        : 0.32,   // mesh opacity in x-ray mode
+  EDGE_ANGLE          : 30,     // crease angle (deg) for x-ray outline edges
+  MATE_COLOR          : 0xffb454,// the previewed neighbouring link in step 2
+  MATE_OPACITY        : 0.5,
+  OVERRIDE_COLOR      : new THREE.Color(0xc792ea),// links swapped for a custom model
+  SELECT_COLOR        : 0xffffff,// selection box around the picked link
+  STL_BYTES_PER_TRI   : 50,     // binary STL: 50 bytes/triangle + 84-byte header
+  MAX_VERTS_PER_LINK  : 2000,   // default per-link vertex cap — auto-simplify targets this
+                                // (≈4k tris/link → 400 links ≈ 1.6M tris ≈ 76 MB STL)
 };
 
 /* ================================ SCENE ================================== */
 const wrap = document.getElementById('canvasWrap');
 const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.localClippingEnabled = true;          // for the section / layer view
 wrap.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -378,6 +448,21 @@ const S = {
   scaleCode:'',          // user JS for per-part size variation
   scaleFn:(n,t)=>1,      // compiled scale function f(n_it, n_it_nor) → scale
   scales:[],             // per-link scale actually used (for status/debug)
+  xray:false,            // semi-transparent render + outlines
+  section:false,         // Z section / layer view active
+  partEdges:null,        // LineSegments outline of the single part (x-ray)
+  matePreview:null,      // ghost of the neighbouring link shown in step 2
+  matePreviewOn:true,    // user toggle for that ghost
+  geoPristine:null,      // pre-simplify copy of baseGeo, for "restore full detail"
+  appliedPct:0,          // reduction % currently baked into baseGeo (0 = full detail)
+  overrides:new Map(),   // link index → {geo,name}: that slot uses a custom model
+  overrideGroup:null,    // THREE.Group of the custom-link meshes
+  selectedLink:null,     // index of the link picked in the viewport (for swapping)
+  selBox:null,           // Box3Helper around the selected link
+  uiStep:'s1',           // which wizard step's view is showing (drives part-vs-chain visibility)
+  showVerts:false,       // debug: render the part's vertices as points
+  showWire:false,        // debug: render the part's full triangle wireframe
+  dbgPoints:null, dbgWire:null,
 };
 let arm = null;          // current armed click-mode: 'pickFace','placePin','placeHole'
 
@@ -389,14 +474,27 @@ const status = (msg,kind='') => { const e=$('status'); e.textContent=msg; e.clas
  *  STEP 1 — LOADING, AUTO-ALIGN (PCA), PICK-FACE-TO-LAY-FLAT
  * ======================================================================== */
 
-function setBaseGeometry(geo){
-  // Normalise: non-indexed→keep, ensure normals, weld for clean BVH/normals.
-  geo = geo.index ? geo.toNonIndexed() : geo;
-  geo = BufferGeometryUtils.mergeVertices(geo);   // weld coincident verts
-  geo.computeVertexNormals();
+function setBaseGeometry(geo, opts={}){
+  // faithful=true installs an already-clean mesh verbatim (our own glTF round-trip):
+  // KEEP its index + normals so save/load reproduces the part exactly. The default
+  // path welds + recomputes normals for freshly imported STL/GLB uploads.
+  if(opts.faithful){
+    if(!geo.getAttribute('normal')) geo.computeVertexNormals();
+  }else{
+    geo = geo.index ? geo.toNonIndexed() : geo;
+    geo = BufferGeometryUtils.mergeVertices(geo);   // weld coincident verts
+    geo.computeVertexNormals();
+  }
   geo.computeBoundingBox(); geo.computeBoundingSphere();
 
   if (S.partMesh){ scene.remove(S.partMesh); S.partMesh.geometry.dispose(); }
+  if (S.matePreview){ scene.remove(S.matePreview); S.matePreview.material.dispose(); S.matePreview=null; }
+  if (S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }   // new part → drop the old detail master
+  for (const i of [...S.overrides.keys()]) clearOverride(i);           // and any per-link swaps (slots no longer valid)
+  if (S.overrideGroup){ scene.remove(S.overrideGroup); S.overrideGroup.traverse(o=>o.material&&o.material.dispose()); S.overrideGroup=null; }
+  S.selectedLink=null; if(S.selBox){ scene.remove(S.selBox); S.selBox=null; }
+  S.appliedPct=0;
+  $('simReset')&&($('simReset').disabled=true); if($('simPct')){$('simPct').value=0;$('simPctR').value=0;}
   if (S.baseGeo){ S.baseGeo.disposeBoundsTree?.(); S.baseGeo.dispose(); }
 
   S.baseGeo = geo;
@@ -407,7 +505,10 @@ function setBaseGeometry(geo){
   S.pickedNormal=null; clearHighlight(); clearSymmetry();
   S.meshDirty=true;                         // geometry changed → upload again on next save
   frameCamera();
+  updatePartEdges(); applyXray(); applySection();   // keep render modes consistent across loads
+  updateDebugViz();
   updateMeshChips();
+  if($('simAuto')){ if($('simAuto').checked) autoFitReduction(false); else updateSimEstimate(); }   // show the recommended reduction
   $('s1next').disabled=false;
   drop.classList.add('hide');               // load done → drop the overlay (async, so can't rely on maybeHide at drop time)
   status('Part loaded. Auto-align, then pick the face to lay flat.','ok');
@@ -417,7 +518,7 @@ function updateMeshChips(){
   if(!S.baseGeo) return;
   const b=new THREE.Box3().setFromBufferAttribute(S.baseGeo.attributes.position);
   const s=b.getSize(new THREE.Vector3());
-  $('chipMesh').innerHTML=`<b>${S.baseGeo.attributes.position.count.toLocaleString()}</b> verts`;
+  $('chipMesh').innerHTML=`<b>${S.baseGeo.attributes.position.count.toLocaleString()}</b> verts · ${Math.round(triCount(S.baseGeo)).toLocaleString()} tris`;
   $('chipSize').innerHTML=`bbox <b>${s.x.toFixed(1)}×${s.y.toFixed(1)}×${s.z.toFixed(1)}</b> mm`;
 }
 
@@ -463,6 +564,8 @@ function bakeMatrix(m){
   S.baseGeo.disposeBoundsTree?.();              // invalidate BVH; rebuilt lazily
   S.baseGeo.boundsTree=null;
   S.meshDirty=true;                             // alignment baked in → re-upload on save
+  updatePartEdges();                            // x-ray outline follows the alignment
+  updateDebugViz();
   updateMeshChips();
   // mirror planes are stored in geometry coords → carry them through the SAME
   // rigid transform so the lines stay locked to the part as it rotates.
@@ -742,11 +845,13 @@ function buildGizmos(){
   pinGizmo =makeCylinderGizmo(CONST.PIN_COLOR);  pinGizmo.renderOrder=997;
   holeGizmo=makeCylinderGizmo(CONST.HOLE_COLOR); holeGizmo.renderOrder=997;
   scene.add(pinGizmo,holeGizmo);
+  buildMatePreview();
   syncGizmos();
 }
 function syncGizmos(){
   if(pinGizmo) pinGizmo.position.set(S.pin.x,S.pin.y,0);
   if(holeGizmo)holeGizmo.position.set(S.hole.x,S.hole.y,0);
+  syncMatePreview();
 }
 function syncAnchorInputs(){
   $('pinX').value=S.pin.x.toFixed(1);$('pinY').value=S.pin.y.toFixed(1);
@@ -885,7 +990,9 @@ async function ensureScaleEditor(){
   scaleEditor.onDidChangeModelContent(()=>applyScaleCode(scaleEditor.getValue()));
 }
 
-/* Render the chain with ONE InstancedMesh (one base geo + N matrices). */
+/* Render default links with ONE InstancedMesh (base geo + N matrices); each
+   overridden slot is hidden in the instanced mesh and drawn as its own mesh. */
+const _HIDDEN=new THREE.Matrix4().makeScale(0,0,0);
 function renderChain(poses){
   if(S.chain){scene.remove(S.chain);S.chain.dispose();}
   S.chain=new THREE.InstancedMesh(S.baseGeo,
@@ -893,22 +1000,26 @@ function renderChain(poses){
     poses.length);
   S.chain.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   for(let i=0;i<poses.length;i++){
-    S.chain.setMatrixAt(i,poses[i]);
+    S.chain.setMatrixAt(i, S.overrides.has(i)?_HIDDEN:poses[i]);   // custom slots drawn separately
     S.chain.setColorAt(i, i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR);
   }
   S.chain.instanceMatrix.needsUpdate=true; if(S.chain.instanceColor)S.chain.instanceColor.needsUpdate=true;
   scene.add(S.chain);
+  rebuildOverrideMeshes(poses);
   if(S.partMesh)S.partMesh.visible=false;
   if(pinGizmo)pinGizmo.visible=false; if(holeGizmo)holeGizmo.visible=false;
   if(S.symGroup)S.symGroup.visible=false;     // mirror lines belong to the single part
+  syncPartEdges(); syncMatePreview();         // hide single-part overlays while the chain shows
+  applyXray(); applySection();                // the new instanced material adopts the active modes
 }
 
 /* ---- BVH collision: broadphase AABB → narrowphase intersectsGeometry ---- */
 function ensureBVH(){
   if(!S.baseGeo.boundsTree) S.baseGeo.boundsTree=new MeshBVH(S.baseGeo);
 }
-function worldAABB(pose){
-  const b=S.baseGeo.boundingBox.clone().applyMatrix4(pose);
+function worldAABB(pose,geo){
+  geo=geo||S.baseGeo; if(!geo.boundingBox) geo.computeBoundingBox();
+  const b=geo.boundingBox.clone().applyMatrix4(pose);
   b.expandByScalar(CONST.BBOX_PAD_MM);
   return b;
 }
@@ -916,9 +1027,8 @@ function worldAABB(pose){
    AABB into a uniform grid, then only narrow-phase pairs that share a cell.
    Lets the collision test scale to thousands of links. */
 function checkCollisions(poses){
-  ensureBVH();
   const n=poses.length;
-  const boxes=poses.map(worldAABB);
+  const boxes=poses.map((p,i)=>worldAABB(p,linkGeom(i)));
   // cell size ≈ largest link footprint, so a box spans ~1–2 cells
   let cell=0; const sz=new THREE.Vector3();
   for(const b of boxes){b.getSize(sz);cell=Math.max(cell,sz.x,sz.y);}
@@ -940,8 +1050,8 @@ function checkCollisions(poses){
       const pk=i*n+j; if(tested.has(pk))continue; tested.add(pk);   // dedupe multi-cell pairs
       if(!boxes[i].intersectsBox(boxes[j]))continue;
       pairs++;
-      inv.copy(poses[i]).invert().multiply(poses[j]);
-      if(S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,inv)){ bad.add(i); bad.add(j); }
+      inv.copy(poses[i]).invert().multiply(poses[j]);               // bring link j into link i's frame
+      if(linkGeom(i).boundsTree.intersectsGeometry(linkGeom(j),inv)){ bad.add(i); bad.add(j); }
     }
   }
   return {bad,pairs};
@@ -955,6 +1065,7 @@ function regen(force){
   if(!S.baseGeo||!anchorsValid()) return;
   const poses=buildPoses();
   S.poses=poses;
+  if(S.selectedLink!=null && S.selectedLink>=poses.length){ S.selectedLink=null; updateSwapUI&&updateSwapUI(); }
   renderChain(poses);
   // collisions (gated by count unless forced)
   const doCheck = force || poses.length<=CONST.COLLISION_AUTO_MAX;
@@ -965,8 +1076,9 @@ function regen(force){
     S.chain.setColorAt(i, bad.has(i)?CONST.LINK_BAD_COLOR:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR));
   }
   if(S.chain.instanceColor)S.chain.instanceColor.needsUpdate=true;
+  recolorOverrides(bad); showSelection();
   // footprint vs plate
-  const fp=new THREE.Box3(); poses.forEach((p,i)=>fp.union(worldAABB(p)));
+  const fp=new THREE.Box3(); poses.forEach((p,i)=>fp.union(worldAABB(p,linkGeom(i))));
   const fs=fp.getSize(new THREE.Vector3());
   const plate=P().plate;
   const off = fs.x>plate||fs.y>plate;
@@ -985,6 +1097,7 @@ function regen(force){
   if(off){msg+=` ⚠ Exceeds ${plate} mm plate.`; if(!bad.size)kind='';}
   status(msg,kind);
   $('s3next').disabled=false;
+  if($('simAuto')&&$('simAuto').checked) autoFitReduction(false);   // keep the auto reduction target current with link count
   return {bad,off};
 }
 let lastPlate=CONST.DEFAULT_PLATE_MM;
@@ -1001,13 +1114,15 @@ function updatePlate(size){
 /* ======================================================================== *
  *  STEP 4 — MERGE + EXPORT STL  /  SAVE-LOAD CONFIG
  * ======================================================================== */
-function exportSTL(){
+async function exportSTL(){
   if(!S.poses.length){status('Build the chain first.','err');return;}
+  if($('simAuto').checked) await autoFitReduction(true);   // make sure the file meets the size cap
   const geos=[];
-  for(const pose of S.poses){
-    const g=S.baseGeo.clone();
-    g.applyMatrix4(pose);            // bake world matrix → separate solid
-    g.deleteAttribute('uv');         // keep merge clean
+  for(let i=0;i<S.poses.length;i++){
+    const g=linkGeom(i).clone();     // base part, or this slot's custom model
+    g.applyMatrix4(S.poses[i]);      // bake world matrix → separate solid
+    for(const a of Object.keys(g.attributes)) if(a!=='position'&&a!=='normal') g.deleteAttribute(a);
+    if(!g.attributes.normal) g.computeVertexNormals();   // keep every solid's attribute set identical for the merge
     geos.push(g);
   }
   const merged=BufferGeometryUtils.mergeGeometries(geos,false);
@@ -1016,9 +1131,9 @@ function exportSTL(){
   const dataView=new STLExporter().parse(mesh,{binary:true});
   const blob=new Blob([dataView],{type:'application/octet-stream'});
   download(blob,'articulated_spiral.stl');
-  const tris=merged.attributes.position.count/3;
+  const tris=merged.index?merged.index.count/3:merged.attributes.position.count/3;
   merged.dispose();
-  $('exportOut').innerHTML=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles.`;
+  $('exportOut').innerHTML=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles · ${fmtBytes(blob.size)}.`;
   status('STL downloaded: articulated_spiral.stl','ok');
 }
 function download(blob,name){
@@ -1026,39 +1141,97 @@ function download(blob,name){
   a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 
-/* Serialize the whole working state into one plain object (used by both the
-   JSON download and the server-side projects). */
-/* Upload the current (aligned) geometry to the server as a binary STL and cache
-   its id. No-ops when nothing changed since the last upload. */
+/* Persist the part as binary glTF — lossless (keeps the index + normals), unlike
+   STL which explodes to per-face triangles and forces a lossy re-weld on reload.
+   Cached by id; re-uploaded only when the geometry changed (S.meshDirty). */
+function exportGLB(mesh){
+  return new Promise((resolve,reject)=>
+    new GLTFExporter().parse(mesh, glb=>resolve(glb),
+      err=>reject(err instanceof Error?err:new Error('glTF export failed')), {binary:true}));
+}
+function parseGLB(buf){
+  return new Promise((resolve,reject)=>
+    new GLTFLoader().parse(buf,'', gltf=>{
+      let g=null; gltf.scene.traverse(o=>{ if(!g&&o.isMesh) g=o.geometry; });
+      g?resolve(g):reject(new Error('no mesh found in glTF'));
+    }, err=>reject(err instanceof Error?err:new Error('glTF parse failed'))));
+}
 async function ensureMeshUploaded(){
   if(!S.baseGeo) return null;
   if(S.meshId && !S.meshDirty) return S.meshId;
-  const dv=new STLExporter().parse(new THREE.Mesh(S.baseGeo),{binary:true});
+  const glb=await exportGLB(new THREE.Mesh(S.baseGeo));   // ArrayBuffer
   const res=await fetch('/api/meshes',{method:'POST',
-    headers:{'content-type':'model/stl','x-filename':(S.meshName||'part')+'.stl'},
-    body:dv.buffer ?? dv});
+    headers:{'content-type':'model/gltf-binary','x-filename':(S.meshName||'part')+'.glb'},
+    body:glb});
   if(!res.ok) throw new Error(await res.text());
   const j=await res.json();
   S.meshId=j.id; S.meshDirty=false;
   return S.meshId;
 }
-/* Fetch a previously-uploaded mesh and install it as the base geometry. */
+/* Fetch a previously-uploaded mesh and install it as the base geometry.
+   glTF parts are installed faithfully; legacy .stl projects fall back to the weld path. */
 async function loadMeshFromServer(id){
+  setBaseGeometry(await fetchMeshGeom(id), {faithful:(id.split('.').pop()||'').toLowerCase()!=='stl'});
+}
+/* Fetch any stored mesh → a ready-to-use geometry (normals + bounds). */
+async function fetchMeshGeom(id){
   const res=await fetch('/api/meshes/'+encodeURIComponent(id));
   if(!res.ok) throw new Error('mesh fetch failed ('+res.status+')');
-  setBaseGeometry(new STLLoader().parse(await res.arrayBuffer()));
+  const buf=await res.arrayBuffer();
+  const g=(id.split('.').pop()||'').toLowerCase()==='stl' ? new STLLoader().parse(buf) : await parseGLB(buf);
+  if(!g.getAttribute('normal')) g.computeVertexNormals();
+  g.computeBoundingBox(); g.computeBoundingSphere();
+  return g;
+}
+/* Upload any not-yet-saved per-link override models (lossless glTF), caching ids. */
+async function ensureOverridesUploaded(){
+  for(const [i,o] of S.overrides){
+    if(o.meshId) continue;
+    const glb=await exportGLB(new THREE.Mesh(o.geo));
+    const res=await fetch('/api/meshes',{method:'POST',
+      headers:{'content-type':'model/gltf-binary','x-filename':'link-'+i+'.glb'}, body:glb});
+    if(!res.ok) throw new Error(await res.text());
+    o.meshId=(await res.json()).id;
+  }
+}
+/* Build a geometry from inline position/normal/index arrays (offline configs). */
+function geoFromArrays(pos,nrm,idx){
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  if(Array.isArray(idx)) g.setIndex(idx);
+  if(Array.isArray(nrm)) g.setAttribute('normal',new THREE.Float32BufferAttribute(nrm,3)); else g.computeVertexNormals();
+  g.computeBoundingBox(); g.computeBoundingSphere();
+  return g;
 }
 
 function gatherConfig(opts={}){
   const cfg={
-    version:3, pin:S.pin, hole:S.hole, partZ:S.partZ,
+    version:4, pin:S.pin, hole:S.hole, partZ:S.partZ,
     params:P(),
     scaleCode:S.scaleCode,
     symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
   };
-  // standalone offline export keeps geometry inline so the file stands alone
-  if(opts.inlineGeometry && S.baseGeo) cfg.geometry=Array.from(S.baseGeo.attributes.position.array);
+  // standalone offline export keeps geometry inline so the file stands alone.
+  // store normals + index too → faithful reload (no lossy re-weld), like the glTF path.
+  if(opts.inlineGeometry && S.baseGeo){
+    cfg.geometry=Array.from(S.baseGeo.attributes.position.array);
+    const nrm=S.baseGeo.getAttribute('normal'); if(nrm) cfg.normals=Array.from(nrm.array);
+    if(S.baseGeo.index) cfg.indices=Array.from(S.baseGeo.index.array);
+  }
+  // per-link swaps: reference the uploaded override mesh, or inline its (already-fitted) geometry
+  if(S.overrides.size){
+    cfg.overrides=[...S.overrides].map(([i,o])=>{
+      const e={index:i, name:o.name||('link '+i)};
+      if(o.meshId) e.meshId=o.meshId;
+      if(opts.inlineGeometry){
+        e.geometry=Array.from(o.geo.attributes.position.array);
+        const n=o.geo.getAttribute('normal'); if(n) e.normals=Array.from(n.array);
+        if(o.geo.index) e.indices=Array.from(o.geo.index.array);
+      }
+      return e;
+    });
+  }
   return cfg;
 }
 /* Apply a config object back onto the app. */
@@ -1066,11 +1239,14 @@ async function applyConfig(cfg){
   if(cfg.meshId){
     await loadMeshFromServer(cfg.meshId);     // also clears symmetry
     S.meshId=cfg.meshId;
-  }else if(cfg.geometry){                     // legacy: geometry embedded in the JSON
+  }else if(cfg.geometry){                     // geometry embedded in the JSON
     const g=new THREE.BufferGeometry();
     g.setAttribute('position',new THREE.Float32BufferAttribute(cfg.geometry,3));
-    g.computeVertexNormals();
-    setBaseGeometry(g);
+    if(Array.isArray(cfg.indices)) g.setIndex(cfg.indices);
+    const faithful=Array.isArray(cfg.normals);
+    if(faithful) g.setAttribute('normal',new THREE.Float32BufferAttribute(cfg.normals,3));
+    else g.computeVertexNormals();
+    setBaseGeometry(g,{faithful});
     S.meshId=null;
   }
   S.meshDirty=false;                          // whatever we just loaded is the current saved mesh
@@ -1087,6 +1263,18 @@ async function applyConfig(cfg){
     const r=compileScaleFn(cfg.scaleCode); if(r.fn)S.scaleFn=r.fn;
     if(scaleEditor)scaleEditor.setValue(cfg.scaleCode);
   }
+  // per-link swaps (setBaseGeometry already cleared any stale ones)
+  if(Array.isArray(cfg.overrides)){
+    for(const e of cfg.overrides){
+      try{
+        let g=null;
+        if(e.meshId) g=await fetchMeshGeom(e.meshId);
+        else if(Array.isArray(e.geometry)) g=geoFromArrays(e.geometry,e.normals,e.indices);
+        if(g) S.overrides.set(e.index,{geo:g,name:e.name||('link '+e.index),meshId:e.meshId||null});
+      }catch(err){ status('A swapped link failed to load: '+err.message,'err'); }
+    }
+    updateSwapUI();
+  }
   syncRanges(); markDone('s1'); unlock('s2'); unlock('s3'); buildGizmos();
   setAnchorRanges(); syncAnchorInputs();
   ensureScaleEditor(); openStep('s3'); regen();
@@ -1095,9 +1283,9 @@ async function applyConfig(cfg){
 async function saveCfg(){
   let cfg;
   if(hasServer){
-    try{ await ensureMeshUploaded(); }
+    try{ await ensureMeshUploaded(); await ensureOverridesUploaded(); }
     catch(e){ status('Mesh upload failed: '+e.message,'err'); return; }
-    cfg=gatherConfig();                       // references the server mesh
+    cfg=gatherConfig();                       // references the server meshes
   }else{
     cfg=gatherConfig({inlineGeometry:true});  // no server → keep the file self-contained
   }
@@ -1155,7 +1343,7 @@ async function saveNewProject(){
   if(!S.baseGeo)return projStatus('Load a part first.','err');
   const name=($('projName').value||'').trim()||`spiral ${new Date().toLocaleString()}`;
   try{
-    await ensureMeshUploaded();
+    await ensureMeshUploaded(); await ensureOverridesUploaded();
     const p=await apiCreate(name,gatherConfig());
     S.projectId=p.id; $('projName').value='';
     projStatus(`Saved “${p.name}”.`); refreshProjects();
@@ -1165,7 +1353,7 @@ async function updateCurrentProject(){
   if(!hasServer)return projStatus('Server not running.','err');
   if(!S.projectId)return projStatus('No project loaded — use “Save as new”.','err');
   try{
-    await ensureMeshUploaded();
+    await ensureMeshUploaded(); await ensureOverridesUploaded();
     const name=($('projName').value||'').trim();
     const p=await apiUpdate(S.projectId,{name:name||undefined,config:gatherConfig()});
     projStatus(`Updated “${p.name}”.`); refreshProjects();
@@ -1191,30 +1379,34 @@ async function deleteProject(id){
 /* ======================================================================== *
  *  FILE LOADING (STL / glTF) + DRAG-DROP
  * ======================================================================== */
-function loadArrayBuffer(buf,name){
+/* Parse an STL/glTF ArrayBuffer to ONE BufferGeometry (no install). Used both for
+   the base part and for per-link replacement models. */
+function parseMeshFile(buf,name){
   const ext=name.toLowerCase().split('.').pop();
+  return new Promise((resolve,reject)=>{
+    try{
+      if(ext==='stl'){ resolve(new STLLoader().parse(buf)); }
+      else if(ext==='glb'||ext==='gltf'){
+        const scale=+$('unitScale').value||1;
+        new GLTFLoader().parse(buf,'',(gltf)=>{
+          const geos=[]; gltf.scene.updateMatrixWorld(true);
+          gltf.scene.traverse(o=>{
+            if(o.isMesh){const g=o.geometry.clone();g.applyMatrix4(o.matrixWorld);
+              ['uv','uv2','color'].forEach(a=>g.deleteAttribute(a)); geos.push(g);}
+          });
+          if(!geos.length){reject(new Error('glTF has no meshes'));return;}
+          let g=geos.length>1?BufferGeometryUtils.mergeGeometries(geos,false):geos[0];
+          if(scale!==1)g.scale(scale,scale,scale);
+          resolve(g);
+        },(err)=>reject(new Error('glTF parse error: '+err)));
+      }else reject(new Error('unsupported file type .'+ext));
+    }catch(e){reject(e);}
+  });
+}
+function loadArrayBuffer(buf,name){
   S.meshName=name.replace(/\.[^.]+$/,'')||'part';   // remember for the upload filename
   S.meshId=null;                                     // a fresh file supersedes any saved mesh
-  try{
-    if(ext==='stl'){
-      const g=new STLLoader().parse(buf);
-      setBaseGeometry(g);
-    }else if(ext==='glb'||ext==='gltf'){
-      const scale=+$('unitScale').value||1;
-      new GLTFLoader().parse(buf,'',(gltf)=>{
-        const geos=[];
-        gltf.scene.updateMatrixWorld(true);
-        gltf.scene.traverse(o=>{
-          if(o.isMesh){const g=o.geometry.clone();g.applyMatrix4(o.matrixWorld);
-            ['uv','uv2','color'].forEach(a=>g.deleteAttribute(a)); geos.push(g);}
-        });
-        if(!geos.length){status('glTF has no meshes.','err');return;}
-        let g=geos.length>1?BufferGeometryUtils.mergeGeometries(geos,false):geos[0];
-        if(scale!==1)g.scale(scale,scale,scale);
-        setBaseGeometry(g);
-      },(err)=>status('glTF parse error: '+err,'err'));
-    }else status('Unsupported file type.','err');
-  }catch(e){status('Load error: '+e.message,'err');}
+  parseMeshFile(buf,name).then(g=>setBaseGeometry(g)).catch(e=>status('Load error: '+e.message,'err'));  // setBaseGeometry drops old per-link swaps
 }
 function loadFile(file){
   status('Loading '+file.name+'…');
@@ -1231,26 +1423,402 @@ function view(){return document.getElementById('view');}
 function maybeHide(){ if(S.baseGeo) drop.classList.add('hide'); }
 
 /* ======================================================================== *
+ *  RENDER MODES — X-RAY · SECTION/LAYER VIEW · MATING PREVIEW · SIMPLIFY
+ * ======================================================================== */
+/* Materials that should react to section clipping (all solids on the plate). */
+function overrideMaterials(){ return S.overrideGroup ? S.overrideGroup.children.map(c=>c.material) : []; }
+function clipMaterials(){
+  const o=[];
+  if(S.partMesh)    o.push(S.partMesh.material);
+  if(S.chain)       o.push(S.chain.material);
+  if(S.matePreview) o.push(S.matePreview.material);
+  return o.concat(overrideMaterials());
+}
+/* Materials whose opacity the x-ray toggle drives (the mate ghost is always translucent). */
+function xrayMaterials(){
+  const o=[];
+  if(S.partMesh) o.push(S.partMesh.material);
+  if(S.chain)    o.push(S.chain.material);
+  return o.concat(overrideMaterials());
+}
+
+/* ---- X-RAY: translucent meshes + a crease-edge outline of the single part ---- */
+function updatePartEdges(){
+  if(S.partEdges){ scene.remove(S.partEdges); S.partEdges.geometry.dispose(); S.partEdges.material.dispose(); S.partEdges=null; }
+  if(!S.baseGeo) return;
+  const eg=new THREE.EdgesGeometry(S.baseGeo, CONST.EDGE_ANGLE);
+  S.partEdges=new THREE.LineSegments(eg,new THREE.LineBasicMaterial({color:0x05080c,transparent:true,opacity:.55}));
+  scene.add(S.partEdges);
+  syncPartEdges();
+}
+function syncPartEdges(){
+  if(S.partEdges) S.partEdges.visible = S.xray && !!S.partMesh && S.partMesh.visible;
+}
+/* DEBUG: render the base part's vertices (points) and/or full triangle wireframe,
+   so before/after simplify is plainly visible. Rebuilt whenever the geometry changes. */
+function updateDebugViz(){
+  if(S.dbgPoints){ scene.remove(S.dbgPoints); S.dbgPoints.material.dispose(); S.dbgPoints=null; }   // geometry is the shared baseGeo — don't dispose
+  if(S.dbgWire){ scene.remove(S.dbgWire); S.dbgWire.geometry.dispose(); S.dbgWire.material.dispose(); S.dbgWire=null; }
+  if(S.baseGeo){
+    const partMode = S.uiStep==='s1'||S.uiStep==='s2'||S.uiStep==='proj';
+    const r=(S.baseGeo.boundingSphere&&S.baseGeo.boundingSphere.radius)||40;
+    if(S.showVerts){
+      S.dbgPoints=new THREE.Points(S.baseGeo,new THREE.PointsMaterial({color:0x7ee787,size:Math.max(0.3,r*0.012),sizeAttenuation:true,depthTest:false}));
+      S.dbgPoints.renderOrder=998; S.dbgPoints.visible=partMode; scene.add(S.dbgPoints);
+    }
+    if(S.showWire){
+      S.dbgWire=new THREE.LineSegments(new THREE.WireframeGeometry(S.baseGeo),new THREE.LineBasicMaterial({color:0x4cc2ff,transparent:true,opacity:.45}));
+      S.dbgWire.visible=partMode; scene.add(S.dbgWire);
+    }
+  }
+  updateDbgOut();
+}
+function updateDbgOut(){
+  if(!$('dbgOut')) return;
+  if(!S.baseGeo){ $('dbgOut').textContent='Load a part to see its vertex / triangle count.'; return; }
+  const v=S.baseGeo.attributes.position.count, t=Math.round(triCount(S.baseGeo));
+  const full=S.geoPristine?S.geoPristine.attributes.position.count:null;
+  $('dbgOut').innerHTML = full!=null && full!==v
+    ? `now <b>${v.toLocaleString()}</b> verts · ${t.toLocaleString()} tris  (was ${full.toLocaleString()} verts — ${(100*(1-v/full)).toFixed(0)}% off)`
+    : `<b>${v.toLocaleString()}</b> verts · ${t.toLocaleString()} tris`;
+}
+function applyXray(){
+  const on=S.xray;
+  for(const m of xrayMaterials()){ m.transparent=on; m.opacity=on?CONST.XRAY_OPACITY:1; m.depthWrite=!on; m.needsUpdate=true; }
+  syncPartEdges();
+  $('viewXray').classList.toggle('on',on);
+}
+
+/* ---- SECTION / LAYER VIEW: one clip plane swept down through Z ---- */
+const _clipPlanes=[ new THREE.Plane(new THREE.Vector3(0,0,-1),0) ];   // keeps z ≤ constant
+function contentZRange(){
+  if(S.baseGeo){ S.baseGeo.computeBoundingBox(); const b=S.baseGeo.boundingBox; return {min:b.min.z,max:b.max.z}; }
+  return {min:0,max:10};
+}
+function updateSectionPlane(){
+  const {min,max}=contentZRange();
+  const z=min+(max-min)*(+$('sectionZ').value/100)+1e-3;   // ε so the very top isn't culled
+  _clipPlanes[0].constant=z;
+  $('sectionZval').textContent=z.toFixed(1)+' mm';
+}
+function applySection(){
+  const on=S.section;
+  if(on) updateSectionPlane();
+  for(const m of clipMaterials()){ m.clippingPlanes=on?_clipPlanes:null; m.clipShadows=false; m.needsUpdate=true; }
+  $('viewSection').classList.toggle('on',on);
+  $('sectionBar').classList.toggle('hide',!on);
+}
+
+/* ---- MATING PREVIEW (step 2): ghost of the neighbouring link, overlap-checked ---- */
+function relMate(){
+  // straight (no hinge) neighbour: translate so the neighbour's HOLE lands on our PIN.
+  return new THREE.Matrix4().makeTranslation(S.pin.x-S.hole.x, S.pin.y-S.hole.y, 0);
+}
+function buildMatePreview(){
+  if(!S.baseGeo) return;
+  if(S.matePreview){ scene.remove(S.matePreview); S.matePreview.material.dispose(); S.matePreview=null; }
+  const mat=new THREE.MeshStandardMaterial({color:CONST.MATE_COLOR,metalness:.1,roughness:.75,
+    transparent:true,opacity:CONST.MATE_OPACITY,side:THREE.DoubleSide,depthWrite:false});
+  S.matePreview=new THREE.Mesh(S.baseGeo,mat);
+  S.matePreview.matrixAutoUpdate=false; S.matePreview.renderOrder=1;
+  scene.add(S.matePreview);
+  applySection();                         // adopt the clip plane if section view is on
+  syncMatePreview();
+}
+function syncMatePreview(){
+  if(!S.matePreview) return;
+  const show=S.matePreviewOn && S.uiStep==='s2' && !!S.partMesh && S.partMesh.visible && anchorsValid();
+  S.matePreview.visible=show;
+  if(!show){ $('mateOut').textContent=''; return; }
+  const M=relMate();
+  S.matePreview.matrix.copy(M); S.matePreview.updateMatrixWorld(true);
+  ensureBVH();
+  const hit=S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,M);
+  S.matePreview.material.color.set(hit?0xff6b6b:CONST.MATE_COLOR);
+  $('mateOut').innerHTML = hit
+    ? '<span style="color:var(--bad)">✗ neighbour meshes overlap — links would fuse. Move pin/hole apart or pick a cleaner mating spot.</span>'
+    : '<span style="color:var(--accent2)">✓ neighbour clears — the two meshes don\'t touch at this mating.</span>';
+}
+
+/* ---- SIMPLIFY: reduce triangles per part, with a binary-STL size estimate ---- */
+function triCount(g){ return g ? (g.index ? g.index.count/3 : g.attributes.position.count/3) : 0; }
+function estStlBytes(tris){ return 84 + tris*CONST.STL_BYTES_PER_TRI; }
+function fmtBytes(b){ return b>=1048576 ? (b/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(b/1024))+' KB'; }
+/* Split the chain into reducible base links and fixed-size custom links — simplify
+   only touches the base part, so the size budget must hold the custom tris aside. */
+function chainTriBudget(){
+  const links=Math.max(1,+$('count').value||1);
+  let ovTris=0, ovCount=0;
+  for(const [i,o] of S.overrides){ if(i<links){ ovTris+=triCount(o.geo); ovCount++; } }
+  return {links, baseLinks:Math.max(0,links-ovCount), baseFull:triCount(S.geoPristine||S.baseGeo), ovTris, ovCount};
+}
+function actualChainTris(){
+  if(S.poses.length){ let t=0; for(let i=0;i<S.poses.length;i++) t+=triCount(linkGeom(i)); return t; }
+  const b=chainTriBudget(); return b.baseFull*b.baseLinks+b.ovTris;
+}
+function baseVertCount(){ const g=S.geoPristine||S.baseGeo; return g?g.attributes.position.count:0; }
+function updateSimEstimate(){
+  if(!S.baseGeo){ $('simEst').textContent=''; return; }
+  const {links,baseLinks,baseFull,ovTris,ovCount}=chainTriBudget();
+  const pct=+$('simPct').value/100;
+  const fullV=baseVertCount(), tgtV=Math.max(4,Math.round(fullV*(1-pct)));
+  const tgtTotal=Math.round(baseFull*(1-pct)*baseLinks+ovTris);
+  const fullTotal=Math.round(baseFull*baseLinks+ovTris);
+  const note = ovCount?`, ${ovCount} custom`:'';
+  $('simEst').innerHTML = pct>0
+    ? `${fullV.toLocaleString()} → <b>${tgtV.toLocaleString()}</b> verts/link · whole chain ≈ <b>${fmtBytes(estStlBytes(tgtTotal))}</b> (${links} links${note})`
+    : `${fullV.toLocaleString()} verts/link · whole chain ≈ ${fmtBytes(estStlBytes(fullTotal))} (${links} links${note})`;
+}
+/* Swap in a new base geometry without the camera-reframe / anchor-reset that
+   setBaseGeometry does — used by simplify, which must keep the current layout. */
+function swapBaseGeometry(geo){
+  geo = geo.index ? geo.toNonIndexed() : geo;
+  geo = BufferGeometryUtils.mergeVertices(geo);
+  geo.computeVertexNormals(); geo.computeBoundingBox(); geo.computeBoundingSphere();
+  const old=S.baseGeo;
+  S.baseGeo=geo;
+  if(S.partMesh)    S.partMesh.geometry=geo;
+  if(S.matePreview) S.matePreview.geometry=geo;
+  if(old){ old.disposeBoundsTree?.(); old.dispose(); }     // chain is rebuilt by regen() right after
+  updatePartEdges(); updateDebugViz(); updateMeshChips();
+}
+/* ---- FAST decimation via vertex clustering ----------------------------------
+   three's SimplifyModifier is ~O(n²) and hangs the tab on the big meshes that
+   actually need reducing. Clustering is O(n): snap vertices to a uniform grid,
+   collapse each occupied cell to its centroid, drop degenerate triangles. We
+   binary-search the grid resolution to land at ≤ the target vertex count.        */
+function clusterDecimate(src,grid){
+  src.computeBoundingBox();
+  const min=src.boundingBox.min, size=new THREE.Vector3().subVectors(src.boundingBox.max,min);
+  const sx=size.x||1, sy=size.y||1, sz=size.z||1;
+  const pos=src.attributes.position, n=pos.count, idx=src.index;
+  const key=i=>{
+    const cx=Math.min(grid-1,Math.max(0,Math.floor((pos.getX(i)-min.x)/sx*grid)));
+    const cy=Math.min(grid-1,Math.max(0,Math.floor((pos.getY(i)-min.y)/sy*grid)));
+    const cz=Math.min(grid-1,Math.max(0,Math.floor((pos.getZ(i)-min.z)/sz*grid)));
+    return (cx*grid+cy)*grid+cz;
+  };
+  const cell=new Map();                       // key → [sumX,sumY,sumZ,count,outIndex]
+  const vk=new Int32Array(n);
+  for(let i=0;i<n;i++){ const k=key(i); vk[i]=k; let c=cell.get(k); if(!c){c=[0,0,0,0,-1];cell.set(k,c);}
+    c[0]+=pos.getX(i); c[1]+=pos.getY(i); c[2]+=pos.getZ(i); c[3]++; }
+  const outPos=new Float32Array(cell.size*3); let oi=0;
+  for(const c of cell.values()){ c[4]=oi; outPos[oi*3]=c[0]/c[3]; outPos[oi*3+1]=c[1]/c[3]; outPos[oi*3+2]=c[2]/c[3]; oi++; }
+  const outIdx=[];
+  const tri=(a,b,d)=>{ const ia=cell.get(vk[a])[4],ib=cell.get(vk[b])[4],id=cell.get(vk[d])[4];
+    if(ia!==ib&&ib!==id&&ia!==id) outIdx.push(ia,ib,id); };
+  if(idx){ const A=idx.array; for(let t=0;t<A.length;t+=3) tri(A[t],A[t+1],A[t+2]); }
+  else { for(let t=0;t<n;t+=3) tri(t,t+1,t+2); }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(outPos,3));
+  g.setIndex(outIdx);
+  return g;
+}
+function decimateToVertexTarget(src,target){
+  if(src.attributes.position.count<=target) return src.clone();
+  let lo=2, hi=220, best=null;
+  for(let it=0; it<9 && lo<=hi; it++){
+    const grid=Math.max(2,Math.round((lo+hi)/2));
+    const g=clusterDecimate(src,grid), v=g.attributes.position.count;
+    if(v>target){ hi=grid-1; g.dispose(); }
+    else { if(best)best.dispose(); best=g; lo=grid+1; }   // keep finest result still ≤ target
+  }
+  const out=best||clusterDecimate(src,2);
+  out.computeBoundingBox(); out.computeBoundingSphere();
+  return out;
+}
+/* Core apply: decimate the FULL-detail master to ≤ `target` vertices. Driving by an
+   absolute vertex target (not a % slider) is essential — a huge mesh needs >95%
+   reduction to reach the per-link cap, which the % path could never express. */
+async function applyVertexTarget(target){
+  if(!S.baseGeo) return;
+  if(!S.geoPristine) S.geoPristine=S.baseGeo.clone();      // keep a full-detail master
+  target=Math.max(8,Math.round(target));
+  $('simApply').disabled=true; status('Simplifying…');
+  await new Promise(r=>setTimeout(r,10));                   // let the panel repaint
+  let g;
+  try{ g=decimateToVertexTarget(S.geoPristine,target); }
+  catch(e){ status('Simplify failed: '+e.message,'err'); $('simApply').disabled=false; return; }
+  swapBaseGeometry(g);
+  const full=S.geoPristine.attributes.position.count, now=S.baseGeo.attributes.position.count;
+  S.appliedPct=Math.round(100*(1-now/full));
+  S.meshDirty=true; $('simReset').disabled=false; $('simApply').disabled=false;
+  regen(); updateSimEstimate();
+  status(`Simplified ${full.toLocaleString()} → ${now.toLocaleString()} verts/link.`,'ok');
+}
+async function applySimplify(){               // manual: reduce by the % slider
+  const pct=+$('simPct').value/100;
+  if(pct<=0){ status('Set a reduction above 0% first.','warn'); return; }
+  const full=(S.geoPristine||S.baseGeo).attributes.position.count;
+  await applyVertexTarget(full*(1-pct));
+}
+function restoreDetail(){
+  if(!S.geoPristine) return;
+  swapBaseGeometry(S.geoPristine.clone());
+  S.appliedPct=0; S.meshDirty=true; $('simReset').disabled=true;
+  regen(); updateSimEstimate(); status('Full detail restored.','ok');
+}
+/* Auto-simplify the base part to ≤ the per-link vertex cap (count-independent, so
+   it can run before the chain exists). Idempotent: skips work if already at/under cap. */
+async function autoFitReduction(apply){
+  if(!S.baseGeo) return;
+  const cap=Math.max(50,(+$('simMaxVerts').value||CONST.MAX_VERTS_PER_LINK));
+  const full=baseVertCount();
+  $('simPct').value=$('simPctR').value = full>cap ? Math.min(99,Math.round(100*(1-cap/full))) : 0;
+  updateSimEstimate();
+  if(!apply) return;
+  if(full<=cap){ if(S.appliedPct>0) restoreDetail(); return; }
+  if(S.baseGeo.attributes.position.count<=cap && S.appliedPct>0) return;   // already at/under cap
+  await applyVertexTarget(cap);
+}
+/* Toggle manual vs automatic reduction controls. */
+function syncSimMode(){
+  const auto=$('simAuto').checked;
+  $('simPct').disabled=auto; $('simPctR').disabled=auto;   // in auto mode the % is computed; "Apply now" still works as a preview
+  if(auto) autoFitReduction(false);     // refresh the shown target (auto-applies when you confirm orientation)
+  else updateSimEstimate();
+}
+
+/* ======================================================================== *
+ *  PER-LINK MODEL OVERRIDES — swap a single chain link for a custom model
+ * ======================================================================== */
+/* Geometry used for link i (a custom override, or the shared base part), with a
+   cached BVH + bbox so collision / footprint / export all work per-link. */
+function linkGeom(i){
+  const o=S.overrides.get(i);
+  const g=o?o.geo:S.baseGeo;
+  if(!g.boundsTree) g.boundsTree=new MeshBVH(g);
+  if(!g.boundingBox) g.computeBoundingBox();
+  return g;
+}
+/* Fit a replacement into a link slot: weld, scale to the base part's overall size,
+   centre it where the base sits, then drop it onto the plate (min z = 0). The user's
+   model still has to carry a compatible pin/hole to truly interlock — use x-ray /
+   section / collision colours to check. */
+function fitReplacement(geo){
+  geo=geo.index?geo.toNonIndexed():geo;
+  geo=BufferGeometryUtils.mergeVertices(geo);
+  geo.computeBoundingBox();
+  S.baseGeo.computeBoundingBox();
+  const bb=S.baseGeo.boundingBox, bsz=bb.getSize(new THREE.Vector3()), bc=bb.getCenter(new THREE.Vector3());
+  const rb=geo.boundingBox, rsz=rb.getSize(new THREE.Vector3()), rc=rb.getCenter(new THREE.Vector3());
+  const s=(bsz.length()||1)/(rsz.length()||1);
+  geo.applyMatrix4(new THREE.Matrix4().makeTranslation(bc.x,bc.y,bc.z)
+    .multiply(new THREE.Matrix4().makeScale(s,s,s))
+    .multiply(new THREE.Matrix4().makeTranslation(-rc.x,-rc.y,-rc.z)));
+  geo.computeBoundingBox(); geo.translate(0,0,-geo.boundingBox.min.z);    // sit on the plate
+  geo.computeVertexNormals(); geo.computeBoundingBox(); geo.computeBoundingSphere();
+  return geo;
+}
+/* Separate meshes for the custom links (the InstancedMesh hides those slots). */
+function rebuildOverrideMeshes(poses){
+  if(S.overrideGroup){ scene.remove(S.overrideGroup); S.overrideGroup.traverse(o=>o.material&&o.material.dispose()); }
+  S.overrideGroup=new THREE.Group(); scene.add(S.overrideGroup);
+  for(const [i,o] of S.overrides){
+    if(i>=poses.length) continue;
+    const m=new THREE.Mesh(o.geo,new THREE.MeshStandardMaterial({color:CONST.OVERRIDE_COLOR,metalness:.1,roughness:.7}));
+    m.matrixAutoUpdate=false; m.matrix.copy(poses[i]); m.updateMatrixWorld(true);
+    m.userData.linkIndex=i; S.overrideGroup.add(m);
+  }
+}
+function recolorOverrides(bad){
+  if(!S.overrideGroup) return;
+  for(const m of S.overrideGroup.children)
+    m.material.color.copy(bad&&bad.has(m.userData.linkIndex)?CONST.LINK_BAD_COLOR:CONST.OVERRIDE_COLOR);
+}
+function clearOverride(i){ const o=S.overrides.get(i); if(o){ o.geo.disposeBoundsTree?.(); o.geo.dispose(); } S.overrides.delete(i); }
+
+/* selection box around the currently picked link */
+function showSelection(){
+  if(S.selBox){ scene.remove(S.selBox); S.selBox=null; }
+  if(S.selectedLink==null || !S.poses[S.selectedLink]) return;
+  S.selBox=new THREE.Box3Helper(worldAABB(S.poses[S.selectedLink],linkGeom(S.selectedLink)),CONST.SELECT_COLOR);
+  scene.add(S.selBox);
+}
+function selectLinkAt(ev){
+  if(!S.chain){ status('Build the chain first.','warn'); return; }
+  pointerNDC(ev);
+  const hits=[];
+  const ch=raycaster.intersectObject(S.chain,false)[0];
+  if(ch&&ch.instanceId!=null) hits.push({d:ch.distance,i:ch.instanceId});
+  if(S.overrideGroup) for(const h of raycaster.intersectObjects(S.overrideGroup.children,false)) hits.push({d:h.distance,i:h.object.userData.linkIndex});
+  if(!hits.length){ status('No link under the cursor — click directly on a link.','warn'); return; }
+  hits.sort((a,b)=>a.d-b.d);
+  S.selectedLink=hits[0].i; showSelection(); updateSwapUI();
+  status('Selected link #'+S.selectedLink+'.');
+}
+function updateSwapUI(){
+  const has=S.selectedLink!=null;
+  $('swapSel').textContent = has
+    ? `Link #${S.selectedLink} selected — ${S.overrides.has(S.selectedLink)?'custom: '+S.overrides.get(S.selectedLink).name:'base part'}`
+    : 'No link selected — click “Select link in viewport”, then a link.';
+  $('swapFileBtn').disabled=!has;
+  $('swapClear').disabled=!(has&&S.overrides.has(S.selectedLink));
+  $('swapClearAll').disabled=S.overrides.size===0;
+}
+function replaceSelectedLink(file){
+  if(S.selectedLink==null){ status('Select a link first.','warn'); return; }
+  const idx=S.selectedLink;
+  status('Loading '+file.name+'…');
+  const r=new FileReader();
+  r.onload=()=>parseMeshFile(r.result,file.name).then(g=>{
+    clearOverride(idx);
+    S.overrides.set(idx,{geo:fitReplacement(g),name:file.name,meshId:null});   // meshId filled in on save
+    regen(); showSelection(); updateSwapUI(); updateSimEstimate();
+    status(`Link #${idx} → “${file.name}”.`,'ok');
+  }).catch(e=>status('Replace failed: '+e.message,'err'));
+  r.readAsArrayBuffer(file);
+}
+
+/* ======================================================================== *
  *  WIZARD GATING + EVENT WIRING
  * ======================================================================== */
 function openStep(id){
   document.querySelectorAll('.step').forEach(s=>{s.classList.remove('open','active');});
   const s=$(id); s.classList.add('open','active');
+  showStepView(id);
 }
 function unlock(id){ $(id).classList.remove('locked'); }
 function markDone(id){ $(id).classList.add('done'); }
 
+/* Switch the viewport between the single-part view (steps 1-2: part + pin/hole
+   gizmos + the two-link mating ghost) and the chain view (steps 3-4). */
+function showStepView(id){
+  S.uiStep=id;
+  const partMode = id==='s1'||id==='s2'||id==='proj';
+  if(S.partMesh) S.partMesh.visible = partMode && !!S.baseGeo;
+  if(pinGizmo)  pinGizmo.visible  = id==='s2';
+  if(holeGizmo) holeGizmo.visible = id==='s2';
+  if(S.symGroup) S.symGroup.visible = partMode && S.symVisible;
+  if(S.chain) S.chain.visible = !partMode;
+  if(S.overrideGroup) S.overrideGroup.visible = !partMode;
+  if(S.selBox) S.selBox.visible = !partMode;
+  if(S.dbgPoints) S.dbgPoints.visible = partMode;
+  if(S.dbgWire) S.dbgWire.visible = partMode;
+  syncPartEdges();
+  syncMatePreview();         // restores the ghost neighbour when returning to step 2
+}
 document.querySelectorAll('.step .head').forEach(h=>{
   h.addEventListener('click',()=>{const s=h.parentElement; if(s.classList.contains('locked'))return;
     const wasOpen=s.classList.contains('open');
     document.querySelectorAll('.step').forEach(x=>x.classList.remove('open'));
-    if(!wasOpen)s.classList.add('open');});
+    if(!wasOpen){
+      s.classList.add('open');
+      const toChain = (s.id==='s3'||s.id==='s4');
+      showStepView(s.id);
+      if(toChain){
+        if(S.baseGeo && anchorsValid()) regen();   // re-lay so step-2 anchor edits are reflected
+      }else if(S.baseGeo){
+        frameCamera();                             // focus the single part + ghost neighbour
+      }
+    }
+  });
 });
 
 /* ---- arm helper for click-modes ---- */
 function setArm(mode,labelId){
   // clear all armed pills
-  ['pickFaceArmed','placePinArmed','placeHoleArmed'].forEach(i=>$(i).innerHTML='');
+  ['pickFaceArmed','placePinArmed','placeHoleArmed','pickLinkArmed'].forEach(i=>$(i).innerHTML='');
   if(arm===mode){arm=null;return;}
   arm=mode;
   if(labelId)$(labelId).innerHTML='<span class="pill armed">click…</span>';
@@ -1278,8 +1846,9 @@ function rotatePartZ(deg){
 $('partZ').oninput =()=>{$('partZR').value=$('partZ').value; rotatePartZ(+$('partZ').value);};
 $('partZR').oninput=()=>{$('partZ').value=$('partZR').value; rotatePartZ(+$('partZR').value);};
 $('toggleSym').onclick=()=>{S.symVisible=!S.symVisible; if(S.symGroup)S.symGroup.visible=S.symVisible;};
-$('s1next').onclick=()=>{
+$('s1next').onclick=async()=>{
   if(!S.baseGeo)return;
+  if($('simAuto').checked) await autoFitReduction(true);   // reduce the part BEFORE any chain work
   // seed anchors to sensible spots if untouched
   const b=S.baseGeo.boundingBox;
   if(S.pin.x===0&&S.pin.y===0&&S.hole.x===0&&S.hole.y===0){
@@ -1305,8 +1874,9 @@ $('placeHole').onclick=()=>setArm('placeHole','placeHoleArmed');
     syncGizmos(); syncAnchorSliders(); $('s2next').disabled=!anchorsValid();
   };
 });
-$('s2next').onclick=()=>{
+$('s2next').onclick=async()=>{
   if(!anchorsValid())return;
+  if($('simAuto').checked) await autoFitReduction(true);   // safety: ensure reduced before the first build
   markDone('s2'); unlock('s3'); openStep('s3'); $('s3').classList.add('active');
   ensureScaleEditor(); syncRanges(); regen();
 };
@@ -1349,7 +1919,32 @@ S.scaleCode=DEFAULT_SCALE_CODE; S.scaleFn=compileScaleFn(DEFAULT_SCALE_CODE).fn;
 $('scaleReset').onclick=()=>{ if(scaleEditor)scaleEditor.setValue(DEFAULT_SCALE_CODE); else applyScaleCode(DEFAULT_SCALE_CODE); };
 $('recheck').onclick=()=>regen(true);
 $('s3next').onclick=()=>{ markDone('s3'); unlock('s4'); openStep('s4'); $('s4').classList.add('active');
-  status('Ready to export.','ok'); };
+  if($('simAuto').checked) autoFitReduction(true); else updateSimEstimate();
+  updateSwapUI(); status('Ready to export — or swap individual links.','ok'); };
+
+/* render-mode + simplify wiring */
+$('viewXray').onclick=()=>{ S.xray=!S.xray; applyXray(); };
+$('viewSection').onclick=()=>{ S.section=!S.section; applySection(); };
+$('sectionZ').oninput=updateSectionPlane;
+$('toggleMate').onclick=()=>{ S.matePreviewOn=!S.matePreviewOn; $('toggleMate').classList.toggle('on',S.matePreviewOn); syncMatePreview(); };
+$('simPct').oninput =()=>{ $('simPctR').value=$('simPct').value; updateSimEstimate(); };
+$('simPctR').oninput=()=>{ $('simPct').value=$('simPctR').value; updateSimEstimate(); };
+$('simApply').onclick=applySimplify;
+$('simReset').onclick=restoreDetail;
+$('simAuto').onchange=syncSimMode;
+$('simMaxVerts').oninput=()=>{ if($('simAuto').checked) autoFitReduction(false); else updateSimEstimate(); };
+syncSimMode();          // controls start in the (default) automatic mode
+
+/* debug geometry inspector */
+$('dbgVerts').onclick=()=>{ S.showVerts=!S.showVerts; $('dbgVerts').classList.toggle('on',S.showVerts); updateDebugViz(); };
+$('dbgWire').onclick =()=>{ S.showWire =!S.showWire;  $('dbgWire').classList.toggle('on',S.showWire);  updateDebugViz(); };
+
+/* swap-individual-links wiring */
+$('pickLink').onclick=()=>setArm('pickLink','pickLinkArmed');
+$('swapFileBtn').onclick=()=>$('swapFileInput').click();
+$('swapFileInput').onchange=e=>{ if(e.target.files[0]){ replaceSelectedLink(e.target.files[0]); e.target.value=''; } };
+$('swapClear').onclick=()=>{ if(S.selectedLink!=null&&S.overrides.has(S.selectedLink)){ clearOverride(S.selectedLink); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('Link reverted to the base part.'); } };
+$('swapClearAll').onclick=()=>{ for(const i of [...S.overrides.keys()]) clearOverride(i); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('All links reverted to the base part.'); };
 
 /* STEP 4 wiring */
 $('exportStl').onclick=exportSTL;
@@ -1371,6 +1966,7 @@ refreshProjects();
 /* ---- viewport click router for armed modes ---- */
 renderer.domElement.addEventListener('pointerdown',ev=>{
   if(!arm||ev.button!==0)return;
+  if(arm==='pickLink'){ selectLinkAt(ev); setArm(null); return; }   // raycasts the chain, not the part
   const hit=rayPart(ev);
   if(arm==='pickFace'){ if(hit)pickFace(hit); setArm(null); return; }
   // anchor modes need a surface point projected to XY (z=0)
