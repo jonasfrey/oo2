@@ -86,7 +86,7 @@
   a.link{color:var(--accent);cursor:pointer;text-decoration:underline}
   .grp{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}
   code{background:#0c1117;border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px}
-  #scaleEditor{height:150px;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin-top:4px}
+  #scaleEditor,#pathEditor{height:150px;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin-top:4px}
   .rngrow{display:flex;align-items:center;gap:8px;margin-top:4px}
   .rnglbl{font-size:11px;color:var(--muted);width:12px;text-align:center;font-weight:600}
   .rngrow input[type=range]{flex:1}
@@ -233,6 +233,13 @@
           <div class="row col"><div class="row" style="margin:0"><label>Loop spacing (mm/turn)</label><input id="spacing" type="number" step="0.5" value="16"></div>
             <input id="spacingR" type="range" min="2" max="60" step="0.5" value="16"></div>
           <p class="hint">Archimedean spiral <b>r = a + bθ</b>. Start radius <b>a</b> is the innermost radius (offset so it doesn't start at the centre). Loop spacing is the radial gap between successive turns — keep it bigger than the part width so loops don't collide.</p>
+          <div class="grp">
+            <h4>Path function (advanced)</h4>
+            <p class="hint">The chain's centre-line as JS: <code>f(t) → {x, y}</code> in mm, where <code>t</code> grows along the chain. Edit it to change the curve — e.g. <code>return { x: t, y: 0 }</code> for a straight line. Moving the Start-radius / Loop-spacing sliders above <b>rewrites</b> this function.</p>
+            <div id="pathEditor"></div>
+            <div class="btnrow" style="margin-top:6px"><button id="pathReset" class="ghost tiny">Reset to spiral (from sliders)</button></div>
+            <p class="hint" id="pathErr"></p>
+          </div>
           <div class="grp">
             <h4>Joint anchors (live)</h4>
             <p class="hint">Nudge the <span class="swatch" style="background:var(--pin)"></span>pin / <span class="swatch" style="background:var(--hole)"></span>hole to retune link pitch &amp; body offset until overlaps (red) clear — the chain re-lays as you type.</p>
@@ -447,6 +454,8 @@ const S = {
   projectId:null,        // currently-loaded server project (null = unsaved)
   scaleCode:'',          // user JS for per-part size variation
   scaleFn:(n,t)=>1,      // compiled scale function f(n_it, n_it_nor) → scale
+  pathCode:'',           // user JS for the chain centre-line  f(t) → {x,y}
+  pathFn:null,           // compiled path function
   scales:[],             // per-link scale actually used (for status/debug)
   xray:false,            // semi-transparent render + outlines
   section:false,         // Z section / layer view active
@@ -905,7 +914,11 @@ const P = ()=>({count:+$('count').value, startR:+$('startR').value, spacing:+$('
    SIZE VARIATION: a scaled link's hole→pin length becomes s_i·d, so the chord
    between consecutive joints must also be s_i·d — otherwise the pin would miss
    the next hole. We therefore walk the spiral with a PER-LINK chord length.    */
-function spiralPoint(a,b,th){ const r=a+b*th; return new THREE.Vector2(r*Math.cos(th),r*Math.sin(th)); }
+/* Evaluate the user's PATH function safely: f(t) → Vector2 (origin on bad output). */
+function pathPoint(t){
+  let q; try{ q=S.pathFn ? S.pathFn(t) : null; }catch(e){ q=null; }
+  return (q && Number.isFinite(q.x) && Number.isFinite(q.y)) ? new THREE.Vector2(q.x,q.y) : new THREE.Vector2(0,0);
+}
 /* Evaluate the user's scale function safely; non-finite / ≤0 falls back to 1. */
 function linkScale(i,count){
   const nor = count>1 ? i/(count-1) : 0;
@@ -917,20 +930,22 @@ function buildPoses(){
   const H=new THREE.Vector2(S.hole.x,S.hole.y), Pp=new THREE.Vector2(S.pin.x,S.pin.y);
   const Vloc=new THREE.Vector2().subVectors(Pp,H);   // local hole→pin
   const d=Vloc.length()||1;
-  const a=Math.max(0,p.startR), b=p.spacing/(2*Math.PI);
   const scales=[];
   for(let i=0;i<p.count;i++) scales.push(linkScale(i,p.count));
-  // walk the spiral, each step advancing θ until the chord from the last joint == s_i·d
-  const Q=[spiralPoint(a,b,0)];
-  let th=0;
+  // Walk the (arbitrary) path f(t): advance t until the chord from the last joint
+  // equals this link's scaled hole→pin length. Path-agnostic — works for the spiral,
+  // a straight line, or any user curve. Local speed sizes the search bracket.
+  const Q=[pathPoint(0)];
+  let t=0;
   for(let k=0;k<p.count;k++){
-    const need=scales[k]*d;                          // this link's scaled hole→pin length
-    const prev=Q[k];
-    const dist=t=>spiralPoint(a,b,t).distanceTo(prev);
-    let lo=th, hi=th + need/Math.max(a+b*th,1) + 0.6;
-    let guard=0; while(dist(hi)<need && guard++<200) hi+=0.6;   // expand until chord ≥ need
-    for(let i=0;i<46;i++){const mid=(lo+hi)/2; if(dist(mid)<need)lo=mid; else hi=mid;}
-    th=(lo+hi)/2; Q.push(spiralPoint(a,b,th));
+    const need=scales[k]*d, prev=Q[k];
+    const dist=u=>pathPoint(u).distanceTo(prev);
+    const eps=Math.max(1e-3, Math.abs(t)*1e-3);
+    let speed=pathPoint(t+eps).distanceTo(prev)/eps; if(!(speed>1e-9)) speed=1;
+    let lo=t, hi=t + need/speed + eps;
+    let guard=0; while(dist(hi)<need && guard++<500) hi += need/speed*0.5 + eps;   // expand until chord ≥ need
+    for(let i=0;i<50;i++){ const mid=(lo+hi)/2; if(dist(mid)<need) lo=mid; else hi=mid; }
+    t=(lo+hi)/2; Q.push(pathPoint(t));
   }
   const baseAng=Math.atan2(Vloc.y,Vloc.x);
   const poses=[];
@@ -988,6 +1003,58 @@ async function ensureScaleEditor(){
     scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
   });
   scaleEditor.onDidChangeModelContent(()=>applyScaleCode(scaleEditor.getValue()));
+}
+
+/* ---- chain centre-line: user JS compiled to f(t) → {x,y} ----------------------
+   t grows along the chain; buildPoses() walks it placing one joint per link. The
+   Start-radius (a) and Loop-spacing (b=spacing/2π) sliders are baked in as consts,
+   so adjusting a slider regenerates (overwrites) this code.                       */
+function pathCodeFor(a,b){
+  const f=n=>Number.isFinite(n)?String(Math.round(n*1000)/1000):'0';
+  return `// Chain centre-line.  t grows along the chain; return the joint {x, y} in mm.
+// The Start-radius / Loop-spacing sliders rewrite a and b below.
+// Straight line instead of a spiral:   return { x: t, y: 0 };
+const a = ${f(a)};          // start radius (mm)
+const b = ${f(b)};          // loop spacing / 2π
+const r = a + b * t;        // Archimedean spiral r = a + bθ
+return { x: r * Math.cos(t), y: r * Math.sin(t) };`;
+}
+function compilePathFn(code){
+  let fn;
+  try{
+    fn = new Function('t', code);                 // user's own machine → eval is the feature
+    const ok=p=>p && Number.isFinite(p.x) && Number.isFinite(p.y);
+    if(!ok(fn(0)) || !ok(fn(1))) throw new Error('function must return {x, y} finite numbers');
+  }catch(e){ return {err:e.message}; }
+  return {fn};
+}
+function applyPathCode(code){
+  S.pathCode=code;
+  const {fn,err}=compilePathFn(code), e=$('pathErr');
+  if(err){ if(e){e.textContent='⚠ '+err; e.style.color='var(--bad)';} return; }   // keep last good fn
+  if(e){ e.textContent='✓ applied'; e.style.color='var(--accent2)'; }
+  S.pathFn=fn; debounceRegen();
+}
+/* Rebuild the path code from the current Start-radius / Loop-spacing sliders. */
+function regeneratePathFromSliders(){
+  const a=Math.max(0,+$('startR').value), b=(+$('spacing').value)/(2*Math.PI);
+  const code=pathCodeFor(a,b);
+  if(pathEditor){ pathEditor.setValue(code); }   // change listener recompiles + regens
+  else applyPathCode(code);
+}
+let pathEditor=null;
+async function ensurePathEditor(){
+  if(pathEditor) return;
+  let monaco;
+  try{ monaco=await window.monacoReady; }
+  catch(err){ if($('pathErr')){$('pathErr').textContent='Monaco failed to load — using the default spiral path.'; $('pathErr').style.color='var(--warn)';} return; }
+  pathEditor=monaco.editor.create($('pathEditor'),{
+    value:S.pathCode||pathCodeFor(25,16/(2*Math.PI)),
+    language:'javascript', theme:'vs-dark',
+    minimap:{enabled:false}, fontSize:12, lineNumbers:'on', tabSize:2,
+    scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
+  });
+  pathEditor.onDidChangeModelContent(()=>applyPathCode(pathEditor.getValue()));
 }
 
 /* Render default links with ONE InstancedMesh (base geo + N matrices); each
@@ -1209,6 +1276,7 @@ function gatherConfig(opts={}){
     version:4, pin:S.pin, hole:S.hole, partZ:S.partZ,
     params:P(),
     scaleCode:S.scaleCode,
+    pathCode:S.pathCode,
     symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
   };
@@ -1263,6 +1331,11 @@ async function applyConfig(cfg){
     const r=compileScaleFn(cfg.scaleCode); if(r.fn)S.scaleFn=r.fn;
     if(scaleEditor)scaleEditor.setValue(cfg.scaleCode);
   }
+  if(typeof cfg.pathCode==='string'){
+    S.pathCode=cfg.pathCode;
+    const r=compilePathFn(cfg.pathCode); if(r.fn)S.pathFn=r.fn;
+    if(pathEditor)pathEditor.setValue(cfg.pathCode);
+  }
   // per-link swaps (setBaseGeometry already cleared any stale ones)
   if(Array.isArray(cfg.overrides)){
     for(const e of cfg.overrides){
@@ -1277,7 +1350,7 @@ async function applyConfig(cfg){
   }
   syncRanges(); markDone('s1'); unlock('s2'); unlock('s3'); buildGizmos();
   setAnchorRanges(); syncAnchorInputs();
-  ensureScaleEditor(); openStep('s3'); regen();
+  ensureScaleEditor(); ensurePathEditor(); openStep('s3'); regen();
   drop.classList.add('hide');
 }
 async function saveCfg(){
@@ -1878,16 +1951,18 @@ $('s2next').onclick=async()=>{
   if(!anchorsValid())return;
   if($('simAuto').checked) await autoFitReduction(true);   // safety: ensure reduced before the first build
   markDone('s2'); unlock('s3'); openStep('s3'); $('s3').classList.add('active');
-  ensureScaleEditor(); syncRanges(); regen();
+  ensureScaleEditor(); ensurePathEditor(); syncRanges(); regen();
 };
 
 /* STEP 3 wiring — keep number + range inputs in sync, debounce regen */
 function syncRanges(){
   [['count','countR'],['startR','startRR'],['spacing','spacingR']].forEach(([n,r])=>{$(r).value=$(n).value;});
 }
-[['count','countR'],['startR','startRR'],['spacing','spacingR']].forEach(([n,r])=>{
-  $(n).oninput=()=>{$(r).value=$(n).value; debounceRegen();};
-  $(r).oninput=()=>{$(n).value=$(r).value; debounceRegen();};
+// count just re-lays; start-radius & loop-spacing REWRITE the path function (which then re-lays)
+[['count','countR',false],['startR','startRR',true],['spacing','spacingR',true]].forEach(([n,r,rewritesPath])=>{
+  const onChange = rewritesPath ? regeneratePathFromSliders : debounceRegen;
+  $(n).oninput=()=>{$(r).value=$(n).value; onChange();};
+  $(r).oninput=()=>{$(n).value=$(r).value; onChange();};
 });
 $('plate').oninput=debounceRegen;
 /* live pin/hole tuning while building the chain — update anchors, mirror into the
@@ -1917,6 +1992,8 @@ function debounceRegen(){clearTimeout(regenTimer);regenTimer=setTimeout(regen,80
 /* size-variation editor: seed the default function, wire the reset button */
 S.scaleCode=DEFAULT_SCALE_CODE; S.scaleFn=compileScaleFn(DEFAULT_SCALE_CODE).fn;
 $('scaleReset').onclick=()=>{ if(scaleEditor)scaleEditor.setValue(DEFAULT_SCALE_CODE); else applyScaleCode(DEFAULT_SCALE_CODE); };
+S.pathCode=pathCodeFor(+$('startR').value, (+$('spacing').value)/(2*Math.PI)); S.pathFn=compilePathFn(S.pathCode).fn;
+$('pathReset').onclick=regeneratePathFromSliders;
 $('recheck').onclick=()=>regen(true);
 $('s3next').onclick=()=>{ markDone('s3'); unlock('s4'); openStep('s4'); $('s4').classList.add('active');
   if($('simAuto').checked) autoFitReduction(true); else updateSimEstimate();
