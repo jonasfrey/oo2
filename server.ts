@@ -12,7 +12,7 @@
  *  the heavy geometry is only sent when a single project is fetched.
  */
 
-const PORT = Number(Deno.env.get("PORT") ?? 8000);
+const PORT = Number(Deno.env.get("PORT") ?? 8005);
 const ROOT = new URL("./", import.meta.url);            // dir this file lives in
 const DATA_DIR = new URL("./data/", import.meta.url);
 const DB_FILE = new URL("./data/projects.json", import.meta.url);
