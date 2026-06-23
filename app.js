@@ -14,6 +14,8 @@ import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg';
 import { SculptController } from './sculpt/SculptController.js';
 import { BRUSH } from './sculpt/Brush.js';
 import { repairGeometry } from './sculpt/MeshRepair.js';
+import { DisplacementController } from './heightmap/DisplacementController.js';
+import { HeightmapEditor }        from './heightmap/HeightmapEditor.js';
 
 // three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
 THREE.BufferGeometry.prototype.computeBoundsTree   = computeBoundsTree;
@@ -472,6 +474,40 @@ function sculptRepair(){
   if(sculpt.active){ sculpt.attach(S.partMesh); applySculptMirror(); }  // rebuild adjacency/seam/BVH
   updateMeshChips();
   status('Repaired: welded, dropped degenerate triangles, recomputed normals.','ok');
+}
+
+/* ======================================================================== *
+ *  HEIGHTMAP DISPLACEMENT (optional step) — paint an image as relief onto
+ *  S.partMesh / S.baseGeo. Mirrors the sculpt enter/exit contract: edits the
+ *  welded base geometry in place so the downstream pipeline keeps working on a
+ *  single mesh. See heightmap/*.js for the modules.
+ * ======================================================================== */
+const heightEditor = new HeightmapEditor({ maxSize: 1024 });
+const disp = new DisplacementController({ scene, camera, renderer, controls, raycaster });
+heightEditor.onChange = (buf, w, h) => { if(disp.active) disp.setHeightBuffer(buf, w, h); };
+
+function enterHeight(){
+  if(!S.baseGeo) return;
+  ensureBVH();
+  disp.attach(S.partMesh, { camera });
+  disp.brush.radius   = UI.hmRadius;
+  disp.brush.strength = UI.hmFlow;
+  disp.erase          = UI.hmErase;
+  disp.strength       = UI.hmStrength;
+  disp.direction      = UI.hmDir;
+  disp.setMapping({ mode: UI.hmMode, axis: UI.hmAxis });
+  if(heightEditor.out) disp.setHeightBuffer(heightEditor.out, heightEditor.width, heightEditor.height);
+  disp.enable();
+  status('Heightmap: load an image, then left-drag to paint relief. Alt+drag orbits.','ok');
+}
+function exitHeight(){
+  disp.disable();
+  // same downstream invalidation as exitSculpt — geometry changed in place
+  S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;
+  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }
+  S.appliedPct=0; if(UI){ UI.simResetDisabled=true; UI.simPct=0; }
+  S.meshDirty=true;
+  updatePartEdges(); updateDebugViz(); updateMeshChips(); setAnchorRanges();
 }
 
 function clearHighlight(){ if(S.highlight){scene.remove(S.highlight);S.highlight.geometry.dispose();S.highlight=null;} }
@@ -1894,10 +1930,13 @@ function markDone(id){ if(UI)UI.steps[id].done=true; }
 
 function showStepView(id){
   const wasSculpt = S.uiStep==='sculpt';
+  const wasHeight = S.uiStep==='height';
   S.uiStep=id;
-  const partMode = id==='s1'||id==='s2'||id==='proj'||id==='sculpt';
+  const partMode = id==='s1'||id==='s2'||id==='proj'||id==='sculpt'||id==='height';
   if(wasSculpt && id!=='sculpt') exitSculpt();
+  if(wasHeight && id!=='height') exitHeight();
   if(id==='sculpt' && !sculpt.active && S.baseGeo) enterSculpt();
+  if(id==='height' && !disp.active && S.baseGeo) enterHeight();
   if(S.partMesh) S.partMesh.visible = partMode && !!S.baseGeo;
   if(pinGizmo)  pinGizmo.visible  = id==='s2';
   if(holeGizmo) holeGizmo.visible = id==='s2';
@@ -2039,7 +2078,7 @@ function chainApp(){
     statusMsg:'Drop a part or use “Choose file…”.', statusKind:'',
     openId:'s1', activeId:'s1',
     steps:{ proj:{done:false,locked:false}, s1:{done:false,locked:false},
-            sculpt:{done:false,locked:true},
+            sculpt:{done:false,locked:true}, height:{done:false,locked:true},
             s2:{done:false,locked:true}, s3:{done:false,locked:true}, s4:{done:false,locked:true} },
     arm:null,
     _loading:false,
@@ -2059,6 +2098,11 @@ function chainApp(){
     /* ----- sculpt (optional step) ----- */
     sculptTool:'draw', sculptRadius:8, sculptStrength:0.5,
     sculptMirror:true, sculptManual:false, sculptAxis:'x', sculptOffset:0,
+    /* ----- heightmap (optional step) ----- */
+    hmStrength:4, hmDir:'normal', hmMode:'planar', hmAxis:'z',
+    hmRadius:8, hmFlow:0.6, hmErase:false,
+    hmBlack:0, hmWhite:1, hmBright:0, hmContrast:1, hmShadows:0, hmHi:0, hmInvert:false,
+    hmLoaded:false,
     /* ----- step 2 ----- */
     pin:{x:0,y:0,z:0}, hole:{x:0,y:0,z:0},
     anchorXmin:-100, anchorXmax:100, anchorYmin:-100, anchorYmax:100, anchorZmin:-20, anchorZmax:20,
@@ -2114,6 +2158,20 @@ function chainApp(){
       this.$watch('sculptAxis',     ()=>applySculptMirror());
       this.$watch('sculptOffset',   ()=>applySculptMirror());
 
+      // heightmap displacement bridges
+      this.$watch('hmRadius',   v=>disp.brush.radius=v);
+      this.$watch('hmFlow',     v=>disp.brush.strength=v);
+      this.$watch('hmErase',    v=>disp.erase=v);
+      this.$watch('hmStrength', v=>disp.setStrength(v));
+      this.$watch('hmDir',      v=>disp.setDirection(v));
+      this.$watch('hmMode',     v=>disp.setMapping({mode:v}));
+      this.$watch('hmAxis',     v=>disp.setMapping({axis:v}));
+      const hmReproc = ()=>heightEditor.setParams({
+        black:this.hmBlack, white:this.hmWhite, brightness:this.hmBright,
+        contrast:this.hmContrast, shadows:this.hmShadows, highlights:this.hmHi, invert:this.hmInvert });
+      for(const k of ['hmBlack','hmWhite','hmBright','hmContrast','hmShadows','hmHi','hmInvert'])
+        this.$watch(k, hmReproc);
+
       syncSimMode();          // controls start in the (default) automatic mode
       refreshProjects();
       status('Drop a part or use “Choose file…”.');
@@ -2136,7 +2194,7 @@ function chainApp(){
       if(this.pin.x===0&&this.pin.y===0&&this.hole.x===0&&this.hole.y===0){
         this.pin={x:b.max.x*0.7,y:0}; this.hole={x:b.min.x*0.7,y:0};   // seed near the two ends
       }
-      markDone('s1'); unlock('sculpt'); unlock('s2'); openStep('s2');
+      markDone('s1'); unlock('sculpt'); unlock('height'); unlock('s2'); openStep('s2');
       buildGizmos(); setAnchorRanges();
       if(S.partMesh)S.partMesh.visible=true;
       if(S.symGroup)S.symGroup.visible=S.symVisible;     // keep mirror lines visible as anchor guides
@@ -2169,6 +2227,20 @@ function chainApp(){
     /* ---- sculpt actions ---- */
     sculptRepair,
     setSculptTool(t){ this.sculptTool=t; },
+
+    /* ---- heightmap actions ---- */
+    async hmLoadFile(e){
+      const f=e.target.files[0]; if(!f) return;
+      await heightEditor.load(f);
+      heightEditor.setParams({ black:this.hmBlack, white:this.hmWhite, brightness:this.hmBright,
+        contrast:this.hmContrast, shadows:this.hmShadows, highlights:this.hmHi, invert:this.hmInvert });
+      heightEditor.setPreviewCanvas(document.getElementById('hmPreview'));
+      this.hmLoaded=true;
+      if(disp.active) disp.setHeightBuffer(heightEditor.out, heightEditor.width, heightEditor.height);
+      status('Heightmap loaded — left-drag on the part to paint relief.','ok');
+    },
+    hmClearMask(){ disp.clearMask(); },
+    hmSmooth(){ disp.smoothMask(0.6, 2); },
 
     /* ---- step 2 actions ---- */
     toggleMate(){ this.matePreviewOn=!this.matePreviewOn; syncMatePreview(); },

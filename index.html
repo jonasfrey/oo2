@@ -170,6 +170,75 @@
         </div>
       </section>
 
+      <!-- HEIGHTMAP DISPLACEMENT (optional) -->
+      <section class="step" id="height"
+        :class="{ open: openId==='height', active: activeId==='height', done: steps.height.done, locked: steps.height.locked }">
+        <div class="head" @click="toggleStep('height')"><span class="num">⛰</span> Heightmap paint (optional)</div>
+        <div class="body" x-show="openId==='height'">
+          <p class="hint">Load a greyscale image, then <b>left-drag</b> to paint relief where you want it. <b>Alt+drag</b> orbits, right-drag pans.</p>
+
+          <div class="grp">
+            <h4>Image</h4>
+            <div class="btnrow"><button class="ghost tiny" @click="$refs.hmFile.click()">Load image…</button></div>
+            <input x-ref="hmFile" type="file" accept="image/*" style="display:none" @change="hmLoadFile($event)">
+            <canvas id="hmPreview" x-show="hmLoaded" style="width:100%;image-rendering:pixelated;border:1px solid #333;margin-top:6px"></canvas>
+          </div>
+
+          <div class="grp" x-show="hmLoaded">
+            <h4>Adjust</h4>
+            <div class="row col"><div class="row" style="margin:0"><label>Black point</label><input x-model.number="hmBlack" type="number" step="0.01" min="0" max="1"></div>
+              <input x-model.number="hmBlack" type="range" min="0" max="1" step="0.01"></div>
+            <div class="row col"><div class="row" style="margin:0"><label>White point</label><input x-model.number="hmWhite" type="number" step="0.01" min="0" max="1"></div>
+              <input x-model.number="hmWhite" type="range" min="0" max="1" step="0.01"></div>
+            <div class="row col"><div class="row" style="margin:0"><label>Lights</label><input x-model.number="hmBright" type="number" step="0.02"></div>
+              <input x-model.number="hmBright" type="range" min="-1" max="1" step="0.01"></div>
+            <div class="row col"><div class="row" style="margin:0"><label>Contrast</label><input x-model.number="hmContrast" type="number" step="0.05"></div>
+              <input x-model.number="hmContrast" type="range" min="0" max="2" step="0.01"></div>
+            <div class="row col"><div class="row" style="margin:0"><label>Shadows</label><input x-model.number="hmShadows" type="number" step="0.02"></div>
+              <input x-model.number="hmShadows" type="range" min="-1" max="1" step="0.01"></div>
+            <div class="row col"><div class="row" style="margin:0"><label>Highlights</label><input x-model.number="hmHi" type="number" step="0.02"></div>
+              <input x-model.number="hmHi" type="range" min="-1" max="1" step="0.01"></div>
+            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="hmInvert" style="width:auto"> <span>Invert</span></label>
+          </div>
+
+          <div class="grp">
+            <h4>Displacement</h4>
+            <div class="row col"><div class="row" style="margin:0"><label>Strength (mm)</label><input x-model.number="hmStrength" type="number" step="0.1"></div>
+              <input x-model.number="hmStrength" type="range" min="0" max="30" step="0.1"></div>
+            <div class="row" style="margin-top:6px"><label>Direction</label>
+              <div class="btnrow">
+                <button class="ghost tiny" :class="{ on: hmDir==='normal' }" @click="hmDir='normal'">Normal</button>
+                <button class="ghost tiny" :class="{ on: hmDir==='axis' }"   @click="hmDir='axis'">Axis</button>
+              </div></div>
+            <div class="row" style="margin-top:6px"><label>Mapping</label>
+              <div class="btnrow">
+                <button class="ghost tiny" :class="{ on: hmMode==='planar' }" @click="hmMode='planar'">Planar</button>
+                <button class="ghost tiny" :class="{ on: hmMode==='uv' }"     @click="hmMode='uv'">UV</button>
+                <button class="ghost tiny" :class="{ on: hmMode==='camera' }" @click="hmMode='camera'">View</button>
+              </div></div>
+            <div class="row" x-show="hmMode!=='uv'"><label>Axis</label>
+              <div class="btnrow">
+                <button class="ghost tiny" :class="{ on: hmAxis==='x' }" @click="hmAxis='x'">X</button>
+                <button class="ghost tiny" :class="{ on: hmAxis==='y' }" @click="hmAxis='y'">Y</button>
+                <button class="ghost tiny" :class="{ on: hmAxis==='z' }" @click="hmAxis='z'">Z</button>
+              </div></div>
+          </div>
+
+          <div class="grp">
+            <h4>Brush</h4>
+            <div class="row col"><div class="row" style="margin:0"><label>Radius (mm)</label><input x-model.number="hmRadius" type="number" step="0.5" min="0.2"></div>
+              <input x-model.number="hmRadius" type="range" min="0.5" max="60" step="0.5"></div>
+            <div class="row col"><div class="row" style="margin:0"><label>Flow</label><input x-model.number="hmFlow" type="number" step="0.05" min="0" max="1"></div>
+              <input x-model.number="hmFlow" type="range" min="0" max="1" step="0.01"></div>
+            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="hmErase" style="width:auto"> <span>Erase (subtract from mask)</span></label>
+            <div class="btnrow" style="margin-top:6px">
+              <button class="ghost tiny" @click="hmSmooth()">Smooth mask</button>
+              <button class="ghost tiny" @click="hmClearMask()">Clear mask</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- STEP 2 -->
       <section class="step" id="s2"
         :class="{ open: openId==='s2', active: activeId==='s2', done: steps.s2.done, locked: steps.s2.locked }">
