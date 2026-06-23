@@ -128,6 +128,48 @@
         </div>
       </section>
 
+      <!-- SCULPT (optional) -->
+      <section class="step" id="sculpt"
+        :class="{ open: openId==='sculpt', active: activeId==='sculpt', done: steps.sculpt.done, locked: steps.sculpt.locked }">
+        <div class="head" @click="toggleStep('sculpt')"><span class="num">✎</span> Sculpt (optional)</div>
+        <div class="body" x-show="openId==='sculpt'">
+          <p class="hint">Left-drag to sculpt. <b>Alt+drag</b> orbits, right-drag pans — without leaving sculpt mode.</p>
+          <div class="grp">
+            <h4>Brush</h4>
+            <div class="btnrow">
+              <button class="ghost tiny" :class="{ on: sculptTool==='draw' }"   @click="setSculptTool('draw')">Draw</button>
+              <button class="ghost tiny" :class="{ on: sculptTool==='carve' }"  @click="setSculptTool('carve')">Carve</button>
+              <button class="ghost tiny" :class="{ on: sculptTool==='smooth' }" @click="setSculptTool('smooth')">Smooth</button>
+            </div>
+            <div class="row col"><div class="row" style="margin:0"><label>Radius (mm)</label><input x-model.number="sculptRadius" type="number" step="0.5" min="0.2"></div>
+              <input x-model.number="sculptRadius" type="range" min="0.5" max="60" step="0.5"></div>
+            <div class="row col"><div class="row" style="margin:0"><label>Strength</label><input x-model.number="sculptStrength" type="number" step="0.05" min="0" max="1"></div>
+              <input x-model.number="sculptStrength" type="range" min="0" max="1" step="0.01"></div>
+          </div>
+          <div class="grp">
+            <h4>Mirror symmetry</h4>
+            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="sculptMirror" style="width:auto"> <span>Mirror every stroke</span></label>
+            <label class="row" style="gap:6px;cursor:pointer;margin-top:4px"><input type="checkbox" x-model="sculptManual" style="width:auto"> <span>Override detected plane</span></label>
+            <template x-if="sculptManual">
+              <div>
+                <div class="btnrow">
+                  <button class="ghost tiny" :class="{ on: sculptAxis==='x' }" @click="sculptAxis='x'">X</button>
+                  <button class="ghost tiny" :class="{ on: sculptAxis==='y' }" @click="sculptAxis='y'">Y</button>
+                  <button class="ghost tiny" :class="{ on: sculptAxis==='z' }" @click="sculptAxis='z'">Z</button>
+                </div>
+                <div class="row"><label>Plane offset (mm)</label><input x-model.number="sculptOffset" type="number" step="0.5"></div>
+              </div>
+            </template>
+            <p class="hint">Defaults to the magenta plane from “Find mirror lines” (Step 1). Tick override to set an axis + offset by hand.</p>
+          </div>
+          <div class="grp">
+            <h4>Repair</h4>
+            <div class="btnrow"><button class="ghost tiny" @click="sculptRepair()">Repair mesh</button></div>
+            <p class="hint">Welds duplicates, drops zero-area triangles, recomputes normals. (Voxel remesh: see <code>sculpt/Voxelizer.js</code> notes.)</p>
+          </div>
+        </div>
+      </section>
+
       <!-- STEP 2 -->
       <section class="step" id="s2"
         :class="{ open: openId==='s2', active: activeId==='s2', done: steps.s2.done, locked: steps.s2.locked }">

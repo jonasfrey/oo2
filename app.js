@@ -11,6 +11,9 @@ import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, MeshBVH }
   from 'three-mesh-bvh';
 import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg';
+import { SculptController } from './sculpt/SculptController.js';
+import { BRUSH } from './sculpt/Brush.js';
+import { repairGeometry } from './sculpt/MeshRepair.js';
 
 // three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
 THREE.BufferGeometry.prototype.computeBoundsTree   = computeBoundsTree;
@@ -421,6 +424,55 @@ function pointerNDC(ev){
   raycaster.setFromCamera(ndc,camera);
 }
 function rayPart(ev){ pointerNDC(ev); return S.partMesh? raycaster.intersectObject(S.partMesh,false)[0] : null; }
+
+/* ======================================================================== *
+ *  SCULPT (optional step) — symmetric brush over S.partMesh / S.baseGeo.
+ *  Edits the welded/indexed base geometry in place, so the chain/CSG/export
+ *  pipeline keeps working on a single mesh. See sculpt/*.js for the modules.
+ * ======================================================================== */
+const sculpt = new SculptController({ scene, camera, renderer, controls, raycaster });
+
+// resolve the mirror plane: detected symmetry by default, manual X/Y/Z + offset override
+function applySculptMirror(){
+  let pt, nrm;
+  if(!UI.sculptManual && S.symPlanes[0]){
+    pt = S.symPlanes[0].p.clone();
+    nrm = S.symPlanes[0].n.clone();
+  }else{
+    const ax = UI.sculptAxis || 'x';
+    nrm = new THREE.Vector3(ax==='x'?1:0, ax==='y'?1:0, ax==='z'?1:0);
+    pt = new THREE.Vector3(); pt[ax] = UI.sculptOffset || 0;
+  }
+  sculpt.setMirror(pt, nrm, UI.sculptMirror);
+}
+function enterSculpt(){
+  if(!S.baseGeo) return;
+  ensureBVH();
+  sculpt.attach(S.partMesh);
+  sculpt.brush.type     = UI.sculptTool || BRUSH.DRAW;
+  sculpt.brush.radius   = UI.sculptRadius;
+  sculpt.brush.strength = UI.sculptStrength;
+  applySculptMirror();
+  sculpt.enable();
+  status('Sculpt: left-drag to paint, Alt+drag to orbit, right-drag to pan.','ok');
+}
+function exitSculpt(){
+  sculpt.disable();
+  // refresh everything downstream that reads S.baseGeo
+  S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;   // chain build rebuilds via ensureBVH()
+  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; } // pre-simplify master no longer valid
+  S.appliedPct=0; if(UI){ UI.simResetDisabled=true; UI.simPct=0; }
+  S.meshDirty=true;
+  updatePartEdges(); updateDebugViz(); updateMeshChips(); setAnchorRanges();
+}
+function sculptRepair(){
+  if(!S.baseGeo) return;
+  const fixed = repairGeometry(S.baseGeo);
+  swapBaseGeometry(fixed);                 // welds, reassigns partMesh.geometry, disposes old BVH
+  if(sculpt.active){ sculpt.attach(S.partMesh); applySculptMirror(); }  // rebuild adjacency/seam/BVH
+  updateMeshChips();
+  status('Repaired: welded, dropped degenerate triangles, recomputed normals.','ok');
+}
 
 function clearHighlight(){ if(S.highlight){scene.remove(S.highlight);S.highlight.geometry.dispose();S.highlight=null;} }
 
@@ -1841,8 +1893,11 @@ function unlock(id){ if(UI)UI.steps[id].locked=false; }
 function markDone(id){ if(UI)UI.steps[id].done=true; }
 
 function showStepView(id){
+  const wasSculpt = S.uiStep==='sculpt';
   S.uiStep=id;
-  const partMode = id==='s1'||id==='s2'||id==='proj';
+  const partMode = id==='s1'||id==='s2'||id==='proj'||id==='sculpt';
+  if(wasSculpt && id!=='sculpt') exitSculpt();
+  if(id==='sculpt' && !sculpt.active && S.baseGeo) enterSculpt();
   if(S.partMesh) S.partMesh.visible = partMode && !!S.baseGeo;
   if(pinGizmo)  pinGizmo.visible  = id==='s2';
   if(holeGizmo) holeGizmo.visible = id==='s2';
@@ -1984,6 +2039,7 @@ function chainApp(){
     statusMsg:'Drop a part or use “Choose file…”.', statusKind:'',
     openId:'s1', activeId:'s1',
     steps:{ proj:{done:false,locked:false}, s1:{done:false,locked:false},
+            sculpt:{done:false,locked:true},
             s2:{done:false,locked:true}, s3:{done:false,locked:true}, s4:{done:false,locked:true} },
     arm:null,
     _loading:false,
@@ -2000,6 +2056,9 @@ function chainApp(){
     showVerts:false, showWire:false,
     cutHeight:0, cutPreview:false, hasCutUndo:false,
     s1nextDisabled:true,
+    /* ----- sculpt (optional step) ----- */
+    sculptTool:'draw', sculptRadius:8, sculptStrength:0.5,
+    sculptMirror:true, sculptManual:false, sculptAxis:'x', sculptOffset:0,
     /* ----- step 2 ----- */
     pin:{x:0,y:0,z:0}, hole:{x:0,y:0,z:0},
     anchorXmin:-100, anchorXmax:100, anchorYmin:-100, anchorYmax:100, anchorZmin:-20, anchorZmax:20,
@@ -2047,6 +2106,13 @@ function chainApp(){
       this.$watch('simPct', ()=>updateSimEstimate());
       this.$watch('sectionZ', ()=>updateSectionPlane());
       this.$watch('cutHeight', ()=>updateCutPreview());
+      this.$watch('sculptTool',     v=>sculpt.brush.type=v);
+      this.$watch('sculptRadius',   v=>sculpt.brush.radius=v);
+      this.$watch('sculptStrength', v=>sculpt.brush.strength=v);
+      this.$watch('sculptMirror',   ()=>applySculptMirror());
+      this.$watch('sculptManual',   ()=>applySculptMirror());
+      this.$watch('sculptAxis',     ()=>applySculptMirror());
+      this.$watch('sculptOffset',   ()=>applySculptMirror());
 
       syncSimMode();          // controls start in the (default) automatic mode
       refreshProjects();
@@ -2070,7 +2136,7 @@ function chainApp(){
       if(this.pin.x===0&&this.pin.y===0&&this.hole.x===0&&this.hole.y===0){
         this.pin={x:b.max.x*0.7,y:0}; this.hole={x:b.min.x*0.7,y:0};   // seed near the two ends
       }
-      markDone('s1'); unlock('s2'); openStep('s2');
+      markDone('s1'); unlock('sculpt'); unlock('s2'); openStep('s2');
       buildGizmos(); setAnchorRanges();
       if(S.partMesh)S.partMesh.visible=true;
       if(S.symGroup)S.symGroup.visible=S.symVisible;     // keep mirror lines visible as anchor guides
@@ -2099,6 +2165,10 @@ function chainApp(){
     applySimplify, restoreDetail,
     cutFlatBottom, undoCutFlat,
     toggleCutPreview(){ this.cutPreview=!this.cutPreview; if(this.cutPreview)updateCutPreview(); else clearCutPreview(); },
+
+    /* ---- sculpt actions ---- */
+    sculptRepair,
+    setSculptTool(t){ this.sculptTool=t; },
 
     /* ---- step 2 actions ---- */
     toggleMate(){ this.matePreviewOn=!this.matePreviewOn; syncMatePreview(); },
