@@ -118,10 +118,7 @@
           </div>
           <div class="grp">
             <h4>Inspect geometry (debug)</h4>
-            <div class="btnrow">
-              <button class="ghost tiny" :class="{ on: showVerts }" @click="toggleVerts()">Vertices</button>
-              <button class="ghost tiny" :class="{ on: showWire }" @click="toggleWire()">Wireframe</button>
-            </div>
+            <p class="hint">Toggle <b>Vertices</b> / <b>Wireframe</b> from the top-right corner — available in every step.</p>
             <p class="hint" id="dbgOut" x-html="dbgOut">Load a part to see its vertex / triangle count.</p>
           </div>
           <div class="row" style="margin-top:10px"><button @click="s1Next()" :disabled="s1nextDisabled">Confirm orientation →</button></div>
@@ -161,6 +158,14 @@
               </div>
             </template>
             <p class="hint">Defaults to the magenta plane from “Find mirror lines” (Step 1). Tick override to set an axis + offset by hand.</p>
+          </div>
+          <div class="grp">
+            <h4>History</h4>
+            <div class="btnrow">
+              <button class="ghost tiny" :disabled="!canUndo" @click="undo()">↶ Undo</button>
+              <button class="ghost tiny" :disabled="!canRedo" @click="redo()">↷ Redo</button>
+            </div>
+            <p class="hint">One step per stroke. <b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b>. Resets when you switch modes or change topology.</p>
           </div>
           <div class="grp">
             <h4>Repair</h4>
@@ -235,6 +240,15 @@
               <button class="ghost tiny" @click="hmSmooth()">Smooth mask</button>
               <button class="ghost tiny" @click="hmClearMask()">Clear mask</button>
             </div>
+          </div>
+
+          <div class="grp">
+            <h4>History</h4>
+            <div class="btnrow">
+              <button class="ghost tiny" :disabled="!canUndo" @click="undo()">↶ Undo</button>
+              <button class="ghost tiny" :disabled="!canRedo" @click="redo()">↷ Redo</button>
+            </div>
+            <p class="hint">One step per stroke. <b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b>. Resets when you switch modes or change topology.</p>
           </div>
         </div>
       </section>
@@ -398,6 +412,8 @@
       <button title="Side (along +X)"  @click="setView('side')">Side</button>
     </div>
     <div id="renderbtns">
+      <button title="Show mesh vertices as points (any step)" :class="{ on: showVerts }" @click="toggleVerts()">Vertices</button>
+      <button title="Show mesh wireframe (any step)" :class="{ on: showWire }" @click="toggleWire()">Wireframe</button>
       <button title="X-ray: semi-transparent parts + outlines" :class="{ on: xray }" @click="toggleXray()">X-ray</button>
       <button title="Section / layer view: sweep a cut plane down through Z" :class="{ on: section }" @click="toggleSection()">Section</button>
     </div>

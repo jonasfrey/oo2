@@ -36,6 +36,9 @@ export class SculptController {
     this._found = new Set();
     this._dirtyNormals = false;
 
+    this.onStrokeStart = null;            // () => void, fired once when a left-drag stroke begins
+    this.onStrokeEnd = null;              // () => void, fired on pointerup (used for undo snapshots)
+
     this._cursor = this._makeCursor();
     this.scene.add(this._cursor);
 
@@ -101,6 +104,7 @@ export class SculptController {
     this.renderer.domElement.setPointerCapture?.(ev.pointerId);
     ev.stopPropagation();
     ev.preventDefault();
+    this.onStrokeStart?.();                         // snapshot the pre-stroke state for undo
     this._apply(hit);
   }
 
@@ -118,6 +122,7 @@ export class SculptController {
     if (this._dirtyNormals) { this.geometry.computeVertexNormals(); this._dirtyNormals = false; }
     this.geometry.computeBoundingBox();
     this.geometry.computeBoundingSphere();
+    this.onStrokeEnd?.();                           // commit the stroke to the undo history
   }
 
   // ---- raycast + cursor ----------------------------------------------------

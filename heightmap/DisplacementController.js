@@ -52,6 +52,9 @@ export class DisplacementController {
     this._found = new Set();
     this._dirtyNormals = false;
 
+    this.onStrokeStart = null;            // () => void, fired when a paint stroke begins
+    this.onStrokeEnd = null;              // () => void, fired on pointerup (used for undo snapshots)
+
     this._cursor = this._makeCursor();
     this.scene.add(this._cursor);
 
@@ -149,6 +152,7 @@ export class DisplacementController {
     this.controls.enabled = false;                            // beat OrbitControls' pointerdown
     this.renderer.domElement.setPointerCapture?.(ev.pointerId);
     ev.stopPropagation(); ev.preventDefault();
+    this.onStrokeStart?.();                                   // snapshot the pre-stroke mask for undo
     this._stamp(hit.point);
   }
 
@@ -164,6 +168,7 @@ export class DisplacementController {
     this.painting = false;
     this.controls.enabled = true;
     this._finishNormals();
+    this.onStrokeEnd?.();                                     // commit the stroke to the undo history
   }
 
   // ---- the stroke ----------------------------------------------------------

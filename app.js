@@ -16,6 +16,7 @@ import { BRUSH } from './sculpt/Brush.js';
 import { repairGeometry } from './sculpt/MeshRepair.js';
 import { DisplacementController } from './heightmap/DisplacementController.js';
 import { HeightmapEditor }        from './heightmap/HeightmapEditor.js';
+import { EditHistory }            from './EditHistory.js';
 
 // three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
 THREE.BufferGeometry.prototype.computeBoundsTree   = computeBoundsTree;
@@ -277,6 +278,7 @@ function setBaseGeometry(geo, opts={}){
   if (S.baseGeo){ S.baseGeo.disposeBoundsTree?.(); S.baseGeo.dispose(); }
 
   S.baseGeo = geo;
+  history?.clear();                          // new part → drop any prior undo history
   S.baseColorsRaw = hasVColor(geo) ? geo.getAttribute('color').array.slice() : null;
   applyColorShades();                       // collapse colored imports to the slider's shade count
   const mat = partMaterial(geo, {side:THREE.DoubleSide});
@@ -455,6 +457,7 @@ function enterSculpt(){
   sculpt.brush.radius   = UI.sculptRadius;
   sculpt.brush.strength = UI.sculptStrength;
   applySculptMirror();
+  history.clear();                 // fresh undo timeline for this sculpt session
   sculpt.enable();
   status('Sculpt: left-drag to paint, Alt+drag to orbit, right-drag to pan.','ok');
 }
@@ -486,6 +489,58 @@ const heightEditor = new HeightmapEditor({ maxSize: 1024 });
 const disp = new DisplacementController({ scene, camera, renderer, controls, raycaster });
 heightEditor.onChange = (buf, w, h) => { if(disp.active) disp.setHeightBuffer(buf, w, h); };
 
+/* ======================================================================== *
+ *  EDIT HISTORY (undo / redo) — one step per brush stroke. Scoped per editing
+ *  session: cleared whenever the baseline changes (mode enter / geometry swap /
+ *  load), so a snapshot is never restored into a mesh of a different topology.
+ * ======================================================================== */
+const history = new EditHistory({ onChange: h => { if(UI){ UI.canUndo=h.canUndo; UI.canRedo=h.canRedo; } } });
+
+// write a position snapshot back into the live base geometry (sculpt undo/redo)
+function restorePositions(arr){
+  const pos=S.baseGeo.attributes.position;
+  pos.array.set(arr); pos.needsUpdate=true;
+  S.baseGeo.boundsTree?.refit?.();
+  S.baseGeo.computeVertexNormals();
+  S.baseGeo.computeBoundingBox(); S.baseGeo.computeBoundingSphere();
+}
+const arraysEqual=(a,b)=>{ if(a.length!==b.length) return false; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return false; return true; };
+
+// --- sculpt: a step = the position delta of one stroke ---
+let _sculptBefore=null;
+sculpt.onStrokeStart=()=>{ _sculptBefore=S.baseGeo.attributes.position.array.slice(); };
+sculpt.onStrokeEnd=()=>{
+  if(!_sculptBefore) return;
+  const before=_sculptBefore, after=S.baseGeo.attributes.position.array.slice();
+  _sculptBefore=null;
+  if(arraysEqual(before,after)) return;                 // brush missed the mesh — no step
+  history.push('Sculpt stroke', ()=>restorePositions(before), ()=>restorePositions(after));
+};
+
+// --- heightmap: a step = the paint-mask delta; positions are re-derived ---
+let _hmBeforeMask=null;
+disp.onStrokeStart=()=>{ _hmBeforeMask=disp.mask.values.slice(); };
+disp.onStrokeEnd=()=>{
+  if(!_hmBeforeMask) return;
+  const before=_hmBeforeMask, after=disp.mask.values.slice();
+  _hmBeforeMask=null;
+  if(arraysEqual(before,after)) return;
+  const applyMask=(m)=>{ disp.mask.values.set(m); disp.redisplaceAll(); disp._finishNormals(); };
+  history.push('Heightmap stroke', ()=>applyMask(before), ()=>applyMask(after));
+};
+
+// Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or Ctrl+Y = redo — only while a brush mode
+// is active, and never while typing in a field or one of the Monaco editors.
+window.addEventListener('keydown', ev=>{
+  if(!(sculpt.active || disp.active)) return;
+  const t=ev.target;
+  if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable||t.closest?.('.monaco-editor'))) return;
+  if(!(ev.ctrlKey||ev.metaKey)) return;
+  const k=ev.key.toLowerCase();
+  if(k==='z'){ ev.preventDefault(); ev.shiftKey ? history.redo() : history.undo(); }
+  else if(k==='y'){ ev.preventDefault(); history.redo(); }
+});
+
 function enterHeight(){
   if(!S.baseGeo) return;
   ensureBVH();
@@ -497,6 +552,7 @@ function enterHeight(){
   disp.direction      = UI.hmDir;
   disp.setMapping({ mode: UI.hmMode, axis: UI.hmAxis });
   if(heightEditor.out) disp.setHeightBuffer(heightEditor.out, heightEditor.width, heightEditor.height);
+  history.clear();                 // fresh undo timeline for this heightmap session
   disp.enable();
   status('Heightmap: load an image, then left-drag to paint relief. Alt+drag orbits.','ok');
 }
@@ -1587,7 +1643,7 @@ function updateDebugViz(){
   if(S.dbgPoints){ scene.remove(S.dbgPoints); S.dbgPoints.material.dispose(); S.dbgPoints=null; }   // geometry is the shared baseGeo — don't dispose
   if(S.dbgWire){ scene.remove(S.dbgWire); S.dbgWire.geometry.dispose(); S.dbgWire.material.dispose(); S.dbgWire=null; }
   if(S.baseGeo){
-    const partMode = S.uiStep==='s1'||S.uiStep==='s2'||S.uiStep==='proj';
+    const partMode = S.uiStep==='s1'||S.uiStep==='s2'||S.uiStep==='proj'||S.uiStep==='sculpt'||S.uiStep==='height';
     const r=(S.baseGeo.boundingSphere&&S.baseGeo.boundingSphere.radius)||40;
     if(UI.showVerts){
       S.dbgPoints=new THREE.Points(S.baseGeo,new THREE.PointsMaterial({color:0x7ee787,size:Math.max(0.3,r*0.012),sizeAttenuation:true,depthTest:false}));
@@ -1696,6 +1752,7 @@ function swapBaseGeometry(geo){
   if(S.partMesh)    S.partMesh.geometry=geo;
   if(S.matePreview) S.matePreview.geometry=geo;
   if(old){ old.disposeBoundsTree?.(); old.dispose(); }     // chain is rebuilt by regen() right after
+  history?.clear();                                        // topology changed → old snapshots are invalid
   updatePartEdges(); updateDebugViz(); updateMeshChips();
 }
 let _simplifierP=null;
@@ -2103,6 +2160,8 @@ function chainApp(){
     hmRadius:8, hmFlow:0.6, hmErase:false,
     hmBlack:0, hmWhite:1, hmBright:0, hmContrast:1, hmShadows:0, hmHi:0, hmInvert:false,
     hmLoaded:false,
+    /* ----- edit history (undo/redo) ----- */
+    canUndo:false, canRedo:false,
     /* ----- step 2 ----- */
     pin:{x:0,y:0,z:0}, hole:{x:0,y:0,z:0},
     anchorXmin:-100, anchorXmax:100, anchorYmin:-100, anchorYmax:100, anchorZmin:-20, anchorZmax:20,
@@ -2241,6 +2300,10 @@ function chainApp(){
     },
     hmClearMask(){ disp.clearMask(); },
     hmSmooth(){ disp.smoothMask(0.6, 2); },
+
+    /* ---- edit history ---- */
+    undo(){ history.undo(); },
+    redo(){ history.redo(); },
 
     /* ---- step 2 actions ---- */
     toggleMate(){ this.matePreviewOn=!this.matePreviewOn; syncMatePreview(); },
