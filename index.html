@@ -60,6 +60,7 @@
           <div class="row col" style="margin-top:8px">
             <div class="row" style="margin:0"><label>Color shades</label><span class="rnglbl" style="width:auto" x-text="colorShades">2</span></div>
             <input x-model.number="colorShades" type="range" min="1" max="8" step="1">
+            <label class="row" style="margin:4px 0 0;gap:6px;cursor:pointer"><input type="checkbox" x-model="purify" style="width:auto"> <span>Pure colours (snap each shade to 0/1 — e.g. pure white &amp; pure green)</span></label>
             <p class="hint" style="margin:4px 0 0">Collapses a colored model's vertex colors to this many shades. Only affects colored meshes.</p>
           </div>
           <div class="grp">
@@ -177,18 +178,30 @@
             <b id="chainLenVal" x-text="chainLenVal">—</b>
             <span class="chainlen-sub" id="chainLenSub" x-text="chainLenSub"></span>
           </div>
+          <div class="row"><label>Shape</label>
+            <select x-model="shape">
+              <option value="straight">Straight chain</option>
+              <option value="spiral">Spiral</option>
+            </select></div>
           <div class="row col"><div class="row" style="margin:0"><label>Links</label><input x-model.number="count" type="number" min="2" max="5000"></div>
             <input x-model.number="count" type="range" min="2" max="2000"></div>
-          <div class="row col"><div class="row" style="margin:0"><label>Start radius (mm)</label><input x-model.number="startR" type="number" step="1"></div>
-            <input x-model.number="startR" type="range" min="0" max="150" step="1"></div>
-          <div class="row col"><div class="row" style="margin:0"><label>Loop spacing (mm/turn)</label><input x-model.number="spacing" type="number" step="0.5"></div>
-            <input x-model.number="spacing" type="range" min="2" max="60" step="0.5"></div>
-          <p class="hint">Archimedean spiral <b>r = a + bθ</b>. Start radius <b>a</b> is the innermost radius (offset so it doesn't start at the centre). Loop spacing is the radial gap between successive turns — keep it bigger than the part width so loops don't collide.</p>
+          <template x-if="shape==='spiral'">
+            <div>
+              <div class="row col"><div class="row" style="margin:0"><label>Start radius (mm)</label><input x-model.number="startR" type="number" step="1"></div>
+                <input x-model.number="startR" type="range" min="0" max="150" step="1"></div>
+              <div class="row col"><div class="row" style="margin:0"><label>Loop spacing (mm/turn)</label><input x-model.number="spacing" type="number" step="0.5"></div>
+                <input x-model.number="spacing" type="range" min="2" max="60" step="0.5"></div>
+              <p class="hint">Archimedean spiral <b>r = a + bθ</b>. Start radius <b>a</b> is the innermost radius (offset so it doesn't start at the centre). Loop spacing is the radial gap between successive turns — keep it bigger than the part width so loops don't collide.</p>
+            </div>
+          </template>
+          <template x-if="shape==='straight'">
+            <p class="hint">A straight chain along +X. Link pitch comes from the pin/hole spacing.</p>
+          </template>
           <div class="grp">
             <h4>Path function (advanced)</h4>
-            <p class="hint">The chain's centre-line as JS: <code>f(t, n_it, n_it_nor, z_stack) → {x, y, z}</code> in mm. <code>t</code> grows continuously along the curve (its scale isn't 1-per-link). <code>n_it</code> is the index (0…count-1) of the link being placed, <code>n_it_nor</code> that index normalized to 0…1 — use either for anything that should step <i>per link</i>, e.g. <code>z: n_it * 3</code> for a staircase. <code>z</code> only ever lifts a link, it never tilts it (rotation is always worked out in x/y only) — same for <code>z_stack</code>, the height already added by the pin/hole z slider before this link, which is applied automatically on top of your <code>z</code> (it's there to react to, not to return). Moving the Start-radius / Loop-spacing sliders above <b>rewrites</b> this function.</p>
+            <p class="hint">The chain's centre-line as JS: <code>f(t, n_it, n_it_nor, z_stack) → {x, y, z}</code> in mm. <code>t</code> grows continuously along the curve (its scale isn't 1-per-link). <code>n_it</code> is the index (0…count-1) of the link being placed, <code>n_it_nor</code> that index normalized to 0…1 — use either for anything that should step <i>per link</i>, e.g. <code>z: n_it * 3</code> for a staircase. <code>z</code> only ever lifts a link, it never tilts it (rotation is always worked out in x/y only) — same for <code>z_stack</code>, the height already added by the pin/hole z slider before this link, which is applied automatically on top of your <code>z</code> (it's there to react to, not to return). Changing the Shape selector / Start-radius / Loop-spacing controls above <b>rewrites</b> this function.</p>
             <div id="pathEditor"></div>
-            <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="pathReset()">Reset to spiral (from sliders)</button></div>
+            <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="pathReset()">Reset path (from Shape)</button></div>
             <p class="hint" id="pathErr" x-text="pathErr" :style="pathErrColor?('color:'+pathErrColor):''"></p>
           </div>
           <div class="grp">
@@ -213,6 +226,13 @@
             <div id="scaleEditor"></div>
             <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="scaleReset()">Reset to default</button></div>
             <p class="hint" id="scaleErr" x-text="scaleErr" :style="scaleErrColor?('color:'+scaleErrColor):''"></p>
+          </div>
+          <div class="grp">
+            <h4>Colour variation (per part)</h4>
+            <p class="hint">JS <code>f(n_it, n_it_nor, base) → colour</code>. <code>n_it</code> = part index, <code>n_it_nor</code> = that index normalized to 0–1, <code>base</code> = the part's natural colour <code>{r, g, b}</code> (each 0–1). Return <code>'invert'</code> to swap this part's colours (e.g. white↔green on a 2-colour model), a colour to tint it (hex <code>0xff0000</code>, CSS <code>'#ff0000'</code>/<code>'tomato'</code>, or <code>{r, g, b}</code>), or <code>base</code> to leave it. The default swaps colours on every 2nd part. A tint <i>multiplies</i> a coloured model's own colours; on a plain part it sets the colour outright. Baked into colour exports (GLB/glTF/OBJ); STL has no colour.</p>
+            <div id="colorEditor"></div>
+            <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="colorReset()">Reset to default</button></div>
+            <p class="hint" id="colorErr" x-text="colorErr" :style="colorErrColor?('color:'+colorErrColor):''"></p>
           </div>
           <div class="row"><label>Plate size (mm, square)</label><input x-model.number="plate" type="number" step="10"></div>
           <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="recheck()">Re-check collisions</button></div>

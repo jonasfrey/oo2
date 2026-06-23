@@ -143,6 +143,8 @@ const S = {
   symVisible:true,
   scaleCode:'',          // user JS for per-part size variation
   scaleFn:(n,t)=>1,      // compiled scale function f(n_it, n_it_nor) → scale
+  colorCode:'',          // user JS for per-part colour
+  colorFn:null,          // compiled colour function f(n_it, n_it_nor, base) → colour
   pathCode:'',           // user JS for the chain centre-line  f(t) → {x,y}
   pathFn:null,           // compiled path function
   scales:[],             // per-link scale actually used (for status/debug)
@@ -165,6 +167,22 @@ const S = {
  *  STEP 1 — LOADING, AUTO-ALIGN (PCA), PICK-FACE-TO-LAY-FLAT
  * ======================================================================== */
 function hasVColor(geo){ return !!(geo && geo.getAttribute('color')); }
+// Per-channel (min + max) of the model's palette. For a 2-colour model this equals
+// A+B, so `palette_sum - colour` swaps the two colours exactly (white↔green); the
+// chain shader and the exporter both use it to "invert" a part.
+const SWAP_SUM = new THREE.Vector3(2,2,2);
+const SWAP_UNIFORM = { value: SWAP_SUM };
+function computeSwapSum(){
+  const attr = S.baseGeo && S.baseGeo.getAttribute('color');
+  if(!attr){ SWAP_SUM.set(2,2,2); return; }
+  let mnr=1,mng=1,mnb=1, mxr=0,mxg=0,mxb=0;
+  for(let i=0;i<attr.count;i++){
+    const r=attr.getX(i), g=attr.getY(i), b=attr.getZ(i);
+    if(r<mnr)mnr=r; if(g<mng)mng=g; if(b<mnb)mnb=b;
+    if(r>mxr)mxr=r; if(g>mxg)mxg=g; if(b>mxb)mxb=b;
+  }
+  SWAP_SUM.set(mnr+mxr, mng+mxg, mnb+mxb);
+}
 function asRGB(geo){
   const c=geo.getAttribute('color'); if(!c) return null;
   if(c.itemSize===3 && c.array instanceof Float32Array) return c;
@@ -172,7 +190,7 @@ function asRGB(geo){
   for(let i=0;i<n;i++){ out[i*3]=c.getX(i); out[i*3+1]=c.getY(i); out[i*3+2]=c.getZ(i); }
   return new THREE.Float32BufferAttribute(out,3);
 }
-function quantizeColors(arr, k){
+function quantizeColors(arr, k, purify){
   const n=arr.length/3;
   if(k>=n || k<1) return;
   const cen=new Float32Array(k*3); cen.set(arr.slice(0,3),0);
@@ -202,6 +220,7 @@ function quantizeColors(arr, k){
     for(let c=0;c<k;c++){ if(cnt[c]){ cen[c*3]=sum[c*3]/cnt[c]; cen[c*3+1]=sum[c*3+1]/cnt[c]; cen[c*3+2]=sum[c*3+2]/cnt[c]; } }
     if(!moved && it>0) break;
   }
+  if(purify) for(let c=0;c<k*3;c++) cen[c]=Math.round(cen[c]);   // snap each shade to pure 0/1 channels
   for(let i=0;i<n;i++){ const c=assign[i]; arr[i*3]=cen[c*3]; arr[i*3+1]=cen[c*3+1]; arr[i*3+2]=cen[c*3+2]; }
 }
 function applyColorShades(){
@@ -209,8 +228,9 @@ function applyColorShades(){
   const k=Math.max(1, Math.round((UI?UI.colorShades:2)||2));
   const attr=S.baseGeo.getAttribute('color'); if(!attr) return;
   attr.array.set(S.baseColorsRaw);     // restore originals, then collapse to k shades
-  quantizeColors(attr.array, k);
+  quantizeColors(attr.array, k, UI?UI.purify:false);
   attr.needsUpdate=true;
+  computeSwapSum();                    // palette changed → refresh the colour-swap reflection
 }
 function partMaterial(geo, extra={}){
   const vc=hasVColor(geo);
@@ -643,7 +663,7 @@ function anchorsValid(){
 /* ======================================================================== *
  *  STEP 3 — CHAIN GENERATION + SPIRAL CONTROLS + BVH COLLISION
  * ======================================================================== */
-const P = ()=>({count:UI.count, startR:UI.startR, spacing:UI.spacing, plate:UI.plate});
+const P = ()=>({shape:UI.shape, count:UI.count, startR:UI.startR, spacing:UI.spacing, plate:UI.plate});
 
 function pathPoint(t,n_it,n_it_nor,z_stack){
   let q; try{ q=S.pathFn ? S.pathFn(t,n_it,n_it_nor,z_stack) : null; }catch(e){ q=null; }
@@ -719,15 +739,56 @@ function buildPoses(){
   return poses;
 }
 
-/* ---- per-part size variation ---- */
-const DEFAULT_SCALE_CODE =
-`// n_it     – index of this part (0 … count-1)
+// /* ---- per-part size variation ---- */
+// const DEFAULT_SCALE_CODE =
+//   `// n_it     – index of this part (0 … count-1)
+//   // n_it_nor – that index normalized to 0 … 1
+//   // Return either a single number (uniform scale) or {x, y, z} to scale each axis
+//   // independently (1 = original size on that axis; any axis you omit defaults to 1).
+//   //
+//   // Most patterns below share two knobs:
+//   //   freq – how many cycles run across the whole chain (1 = one cycle)
+//   //   amp  – peak deviation from 1 (the original size)
+//   const TAU = Math.PI * 2;
+
+//   // ── sine wave: smooth swell, dips below 1 as well as above ──
+//   let freq = 1, amp = 0.05;
+//   const n = 1 + Math.sin(n_it_nor * TAU * freq) * amp;
+//   return { x: n, y: n, z: n };
+
+//   // ── linear triangle (in/out ease): up then down, sharp peak ──
+//   // let freq = 1, amp = 1;
+//   // const tri = (-Math.abs(((n_it_nor * freq) % 1) - 0.5) + 0.5) * 2; // 0→1→0
+//   // const n = 1 + tri * amp;
+//   // return { x: n, y: n, z: n };
+
+//   // ── cosine ease (smoothstep): 1 → 1+amp → 1, no kinks ──
+//   // let freq = 1, amp = 0.5;
+//   // const ease = (1 - Math.cos(((n_it_nor * freq) % 1) * TAU)) / 2;   // 0→1→0
+//   // const n = 1 + ease * amp;
+//   // return { x: n, y: n, z: n };
+
+//   // ── pulse / square: alternate big & small in blocks ──
+//   // let freq = 4, amp = 0.3;
+//   // const n = 1 + (((n_it_nor * freq) % 1) < 0.5 ? amp : -amp);
+//   // return { x: n, y: n, z: n };`;
+const DEFAULT_SCALE_CODE = `// n_it     – index of this part (0 … count-1)
 // n_it_nor – that index normalized to 0 … 1
 // Return either a single number (uniform scale) or {x, y, z} to scale each axis
 // independently (1 = original size on that axis; any axis you omit defaults to 1).
 const TAU = Math.PI * 2;
-const n = 1 + Math.sin(n_it_nor * TAU / 2) * 0.05;
-return { x: n, y: n, z: n };`;
+
+let n_freq = 6; 
+let nitn = (n_it_nor*n_freq)%1;
+let namp = .3;
+let noff = 1;
+let ny_linear = (-Math.abs(nitn-0.5)+0.5)*namp + noff;
+
+
+let ny_sine = (Math.sin(nitn*TAU)*.5+0.5)*namp;
+let n = ny_linear;
+n-= n_it_nor*.2;
+return { x: n, y: n, z: n };`
 
 function compileScaleFn(code){
   let fn;
@@ -762,10 +823,82 @@ async function ensureScaleEditor(){
   scaleEditor.onDidChangeModelContent(()=>applyScaleCode(scaleEditor.getValue()));
 }
 
+/* ---- per-part colour ---- */
+const DEFAULT_COLOR_CODE =
+`// n_it     – index of this part (0 … count-1)
+// n_it_nor – that index normalized to 0 … 1
+// base     – this part's natural colour as {r, g, b}, each 0 … 1
+// Return one of:
+//   'invert'  – swap this part's colours (e.g. white<->green on a 2-colour model)
+//   a colour  – tint this part: hex (0xff0000), CSS ('#ff0000' / 'tomato'),
+//               or {r, g, b} 0…1. The tint MULTIPLIES a coloured model's own
+//               colours; on a plain, un-coloured part it sets the colour outright.
+//   base      – leave this part untouched
+
+// Swap the colours on every 2nd part:
+if (n_it % 2 === 1) return 'invert';
+return base;`;
+
+function isInvert(v){ return v==='invert' || (v && typeof v==='object' && v.invert===true); }
+// Mutate `out` (a THREE.Color) from a user-returned colour value; leave it
+// unchanged if the value isn't a colour we recognise.
+function applyColorValue(out, v){
+  if(typeof v==='number' && Number.isFinite(v)){ out.setHex(v & 0xffffff); return; }
+  if(typeof v==='string'){ try{ out.set(v); }catch(e){} return; }
+  if(Array.isArray(v) && v.length>=3 && [v[0],v[1],v[2]].every(n=>Number.isFinite(+n))){ out.setRGB(+v[0],+v[1],+v[2]); return; }
+  if(v && typeof v==='object'){
+    const r=+v.r, g=+v.g, b=+v.b;
+    if([r,g,b].every(Number.isFinite)) out.setRGB(r,g,b);
+  }
+}
+// Evaluate the user's colour fn for part i. Writes the instance tint into `_tmpCol`
+// and returns 1 if the part should be colour-swapped (vc models) else 0.
+function linkPaint(i, count, base, vc){
+  _tmpCol.copy(base);
+  if(!S.colorFn) return 0;
+  const nor = count>1 ? i/(count-1) : 0;
+  let v; try{ v=S.colorFn(i, nor, {r:base.r, g:base.g, b:base.b}); }catch(e){ return 0; }
+  if(isInvert(v)){
+    if(vc) return 1;                                   // real palette swap via the chain shader
+    _tmpCol.setRGB(1-base.r, 1-base.g, 1-base.b);      // plain part → just invert its flat colour
+    return 0;
+  }
+  applyColorValue(_tmpCol, v);                         // a colour → tint
+  return 0;
+}
+function compileColorFn(code){
+  let fn;
+  try{
+    fn = new Function('n_it','n_it_nor','base', code);   // user's own machine → eval is the feature
+    fn(0, 0, {r:1,g:1,b:1});                              // smoke-test: must run without throwing
+  }catch(e){ return {err:e.message}; }
+  return {fn};
+}
+function applyColorCode(code){
+  S.colorCode=code;
+  const {fn,err}=compileColorFn(code);
+  if(err){ UI.colorErr='⚠ '+err; UI.colorErrColor='var(--bad)'; return; }
+  UI.colorErr='✓ applied'; UI.colorErrColor='var(--accent2)';
+  S.colorFn=fn; debounceRegen();
+}
+let colorEditor=null;
+async function ensureColorEditor(){
+  if(colorEditor) return;
+  let monaco;
+  try{ monaco=await window.monacoReady; }
+  catch(err){ UI.colorErr='Monaco failed to load — using the default colour function.'; UI.colorErrColor='var(--warn)'; return; }
+  colorEditor=monaco.editor.create($('colorEditor'),{
+    value:S.colorCode||DEFAULT_COLOR_CODE,
+    language:'javascript', theme:'vs-dark',
+    minimap:{enabled:false}, fontSize:12, lineNumbers:'on', tabSize:2,
+    scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
+  });
+  colorEditor.onDidChangeModelContent(()=>applyColorCode(colorEditor.getValue()));
+}
+
 /* ---- chain centre-line ---- */
-function pathCodeFor(a,b){
-  const f=n=>Number.isFinite(n)?String(Math.round(n*1000)/1000):'0';
-  return `// Chain centre-line.  t grows continuously along the chain (its scale depends on
+const PATH_DOC =
+`// Chain centre-line.  t grows continuously along the chain (its scale depends on
 // the curve, NOT 1-per-link — don't use it to count links). n_it is the index (0…count-1)
 // of the link currently being placed; n_it_nor is that index normalized to 0…1.
 // Use n_it / n_it_nor for anything that should step per link.
@@ -773,17 +906,22 @@ function pathCodeFor(a,b){
 // this link — it's informational, the engine applies it on top of your z automatically. Read
 // it if your own z formula needs to react to the current stair height; don't return it as-is
 // (z_stack + z_stack would double it) — it's already added even if you just "return z: 0".
-// Return the joint {x, y, z} in mm. The Start-radius / Loop-spacing sliders rewrite a, b below.
-// z is optional (defaults to 0 = flat on the plate). It only ever LIFTS each link — rotation is
-// always computed in the x/y plane only, so z (from here, or from the pin/hole slider) never
-// tilts a link, just stacks it higher/lower. Set it for a 3D path:
-//   straight line:     return { x: t, y: 0 };
-//   stair, per link:   return { x: r*Math.cos(t), y: r*Math.sin(t), z: n_it * 3 };
-//   ramp, along curve: return { x: r*Math.cos(t), y: r*Math.sin(t), z: t * 3 };
+// Return the joint {x, y, z} in mm. z is optional (defaults to 0 = flat on the plate). It only
+// ever LIFTS each link — rotation is always computed in the x/y plane only, so z (from here, or
+// from the pin/hole slider) never tilts a link, just stacks it higher/lower.`;
+// shape: 'straight' (default) or 'spiral'. The Shape selector + sliders rewrite this function.
+function pathCodeFor(shape, a, b){
+  const f=n=>Number.isFinite(n)?String(Math.round(n*1000)/1000):'0';
+  if(shape==='spiral')
+    return PATH_DOC + `
+// Archimedean spiral r = a + bθ. The Start-radius / Loop-spacing sliders rewrite a, b below.
 const a = ${f(a)};          // start radius (mm)
 const b = ${f(b)};          // loop spacing / 2π
-const r = a + b * t;        // Archimedean spiral r = a + bθ
+const r = a + b * t;
 return { x: r * Math.cos(t), y: r * Math.sin(t), z: 0 };`;
+  return PATH_DOC + `
+// Straight chain along +X. The link pitch comes from the pin/hole spacing, not from t.
+return { x: t, y: 0, z: 0 };`;
 }
 function compilePathFn(code){
   let fn;
@@ -803,7 +941,7 @@ function applyPathCode(code){
 }
 function regeneratePathFromSliders(){
   const a=Math.max(0,UI.startR), b=UI.spacing/(2*Math.PI);
-  const code=pathCodeFor(a,b);
+  const code=pathCodeFor(UI.shape, a, b);
   if(pathEditor){ pathEditor.setValue(code); }   // change listener recompiles + regens
   else applyPathCode(code);
 }
@@ -814,7 +952,7 @@ async function ensurePathEditor(){
   try{ monaco=await window.monacoReady; }
   catch(err){ UI.pathErr='Monaco failed to load — using the default spiral path.'; UI.pathErrColor='var(--warn)'; return; }
   pathEditor=monaco.editor.create($('pathEditor'),{
-    value:S.pathCode||pathCodeFor(25,16/(2*Math.PI)),
+    value:S.pathCode||pathCodeFor('straight',25,16/(2*Math.PI)),
     language:'javascript', theme:'vs-dark',
     minimap:{enabled:false}, fontSize:12, lineNumbers:'on', tabSize:2,
     scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
@@ -824,16 +962,45 @@ async function ensurePathEditor(){
 
 const _HIDDEN=new THREE.Matrix4().makeScale(0,0,0);
 const WHITE=new THREE.Color(0xffffff);   // neutral instance tint → lets a model's own vertex colors show
+const _tmpCol=new THREE.Color();         // scratch colour reused per setColorAt call
+// Inject a per-instance colour swap into the chain material: when aSwap=1, reflect
+// the vertex colour through the palette mid-point (SWAP_SUM - colour) — a true
+// white↔green swap that a multiply tint (instanceColor) physically can't do.
+function installSwapShader(mat){
+  mat.onBeforeCompile=(shader)=>{
+    shader.uniforms.uSwapSum = SWAP_UNIFORM;
+    shader.vertexShader = 'attribute float aSwap;\nuniform vec3 uSwapSum;\n' +
+      shader.vertexShader.replace('#include <color_vertex>',
+        '#include <color_vertex>\n#ifdef USE_COLOR\n\tif(aSwap > 0.5) vColor.rgb = uSwapSum - vColor.rgb;\n#endif');
+  };
+  mat.customProgramCacheKey=()=>'chain-swap';
+}
+// Set every instance's tint (and the swap attribute on coloured models). `bad` is the
+// collision set (null on the first paint); colliding links are forced red, no swap.
+function paintChain(poses, bad){
+  const vc=hasVColor(S.baseGeo);
+  const swapArr = vc ? new Float32Array(poses.length) : null;
+  for(let i=0;i<poses.length;i++){
+    const base = vc?WHITE:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR);
+    let sw=0;
+    if(bad && bad.has(i)) _tmpCol.copy(CONST.LINK_BAD_COLOR);
+    else sw=linkPaint(i, poses.length, base, vc);
+    if(swapArr) swapArr[i]=sw;
+    S.chain.setColorAt(i, _tmpCol);
+  }
+  if(S.chain.instanceColor) S.chain.instanceColor.needsUpdate=true;
+  if(vc) S.baseGeo.setAttribute('aSwap', new THREE.InstancedBufferAttribute(swapArr,1));
+}
 function renderChain(poses){
   if(S.chain){scene.remove(S.chain);S.chain.dispose();}
-  S.chain=new THREE.InstancedMesh(S.baseGeo, partMaterial(S.baseGeo,{roughness:.7}), poses.length);
+  const mat=partMaterial(S.baseGeo,{roughness:.7});
+  if(hasVColor(S.baseGeo)) installSwapShader(mat);   // enable per-part colour swap on coloured models
+  S.chain=new THREE.InstancedMesh(S.baseGeo, mat, poses.length);
   S.chain.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  const vc=hasVColor(S.baseGeo);   // colored model → don't tint links (white), keep real colors
-  for(let i=0;i<poses.length;i++){
+  for(let i=0;i<poses.length;i++)
     S.chain.setMatrixAt(i, S.overrides.has(i)?_HIDDEN:poses[i]);   // custom slots drawn separately
-    S.chain.setColorAt(i, vc?WHITE:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR));
-  }
-  S.chain.instanceMatrix.needsUpdate=true; if(S.chain.instanceColor)S.chain.instanceColor.needsUpdate=true;
+  S.chain.instanceMatrix.needsUpdate=true;
+  paintChain(poses, null);
   scene.add(S.chain);
   rebuildOverrideMeshes(poses);
   if(S.partMesh)S.partMesh.visible=false;
@@ -897,11 +1064,7 @@ function regen(force){
   let bad=new Set(), pairs=0;
   if(doCheck) ({bad,pairs}=checkCollisions(poses));
   S.collideSet=bad;
-  const vc=hasVColor(S.baseGeo);   // colored model: flag collisions red, otherwise show real colors (white tint)
-  for(let i=0;i<poses.length;i++){
-    S.chain.setColorAt(i, bad.has(i)?CONST.LINK_BAD_COLOR:(vc?WHITE:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR)));
-  }
-  if(S.chain.instanceColor)S.chain.instanceColor.needsUpdate=true;
+  paintChain(poses, bad);            // re-tint, flagging collisions red
   recolorOverrides(bad); showSelection();
   const fp=new THREE.Box3(); poses.forEach((p,i)=>fp.union(worldAABB(p,linkGeom(i))));
   const fs=fp.getSize(new THREE.Vector3());
@@ -984,6 +1147,16 @@ async function exportChain(){
     for(const a of Object.keys(g.attributes)) if(a!=='position'&&a!=='normal'&&!(keepColor&&a==='color')) g.deleteAttribute(a);
     if(keepColor && !g.getAttribute('color'))   // an uncolored override → white-fill so the merge's attrs match
       g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count*3).fill(1),3));
+    if(keepColor && S.colorFn){                  // bake the per-part colour callback into the exported colours
+      const ca=g.getAttribute('color'), nor=S.poses.length>1?i/(S.poses.length-1):0;
+      let rv; try{ rv=S.colorFn(i,nor,{r:1,g:1,b:1}); }catch(e){ rv=undefined; }
+      if(isInvert(rv)){                          // palette swap → reflect through SWAP_SUM (same as the viewport shader)
+        for(let v=0;v<ca.count;v++) ca.setXYZ(v, SWAP_SUM.x-ca.getX(v), SWAP_SUM.y-ca.getY(v), SWAP_SUM.z-ca.getZ(v));
+      } else {                                   // a colour → multiply tint
+        const tint=new THREE.Color(); applyColorValue(tint.copy(WHITE), rv);
+        for(let v=0;v<ca.count;v++) ca.setXYZ(v, ca.getX(v)*tint.r, ca.getY(v)*tint.g, ca.getZ(v)*tint.b);
+      }
+    }
     if(!g.attributes.normal) g.computeVertexNormals();   // keep every solid's attribute set identical for the merge
     geos.push(g);
   }
@@ -1063,6 +1236,7 @@ function gatherConfig(opts={}){
     version:4, pin:{x:UI.pin.x,y:UI.pin.y,z:UI.pin.z||0}, hole:{x:UI.hole.x,y:UI.hole.y,z:UI.hole.z||0}, partZ:UI.partZ,
     params:P(),
     scaleCode:S.scaleCode,
+    colorCode:S.colorCode,
     pathCode:S.pathCode,
     symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
@@ -1107,6 +1281,7 @@ async function applyConfig(cfg){
     if(cfg.hole) Object.assign(UI.hole,cfg.hole);
     S.partZ=cfg.partZ||0; UI.partZ=S.partZ;
     const p=cfg.params||{};
+    if(p.shape!=null)UI.shape=p.shape;
     if(p.count!=null)UI.count=p.count; if(p.startR!=null)UI.startR=p.startR;
     if(p.spacing!=null)UI.spacing=p.spacing; if(p.plate!=null)UI.plate=p.plate;
     if(Array.isArray(cfg.symPlanes)){
@@ -1117,6 +1292,11 @@ async function applyConfig(cfg){
       S.scaleCode=cfg.scaleCode;
       const r=compileScaleFn(cfg.scaleCode); if(r.fn)S.scaleFn=r.fn;
       if(scaleEditor)scaleEditor.setValue(cfg.scaleCode);
+    }
+    if(typeof cfg.colorCode==='string'){
+      S.colorCode=cfg.colorCode;
+      const r=compileColorFn(cfg.colorCode); if(r.fn)S.colorFn=r.fn;
+      if(colorEditor)colorEditor.setValue(cfg.colorCode);
     }
     if(typeof cfg.pathCode==='string'){
       S.pathCode=cfg.pathCode;
@@ -1136,7 +1316,7 @@ async function applyConfig(cfg){
     }
     markDone('s1'); unlock('s2'); unlock('s3'); buildGizmos();
     setAnchorRanges();
-    ensureScaleEditor(); ensurePathEditor(); openStep('s3'); regen();
+    ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); openStep('s3'); regen();
     UI.dropHide=true;
   } finally { UI._loading=false; }
 }
@@ -1778,6 +1958,7 @@ window.addEventListener('pointerup',()=>{
     const w=Math.min(Math.max(ev.clientX,280),Math.min(window.innerWidth-280,1100));
     root.style.setProperty('--panel-w',w+'px');
     if(scaleEditor) scaleEditor.layout();
+    if(colorEditor) colorEditor.layout();
     if(pathEditor) pathEditor.layout();
   });
   handle.addEventListener('pointerup',ev=>{
@@ -1786,6 +1967,7 @@ window.addEventListener('pointerup',()=>{
     handle.releasePointerCapture(ev.pointerId);
     localStorage.setItem('panelW',root.style.getPropertyValue('--panel-w').replace('px',''));
     if(scaleEditor) scaleEditor.layout();
+    if(colorEditor) colorEditor.layout();
     if(pathEditor) pathEditor.layout();
   });
 })();
@@ -1810,7 +1992,7 @@ function chainApp(){
     /* ----- HUD chips ----- */
     chipMesh:'No mesh loaded', chipSize:'', chipCollide:'',
     /* ----- step 1 ----- */
-    unitScale:1, colorShades:2, partZ:0,
+    unitScale:1, colorShades:2, purify:false, partZ:0,
     symOut:'',
     simAuto:true, simMaxVerts:2000, simPct:0,
     simEst:'', dbgOut:'Load a part to see its vertex / triangle count.',
@@ -1824,8 +2006,8 @@ function chainApp(){
     mateOut:'', matePreviewOn:true, anchorWarn:'', s2nextDisabled:true,
     /* ----- step 3 ----- */
     chainLenVal:'—', chainLenSub:'',
-    count:14, startR:25, spacing:16, plate:220,
-    scaleErr:'', scaleErrColor:'', pathErr:'', pathErrColor:'', solveOut:'',
+    shape:'straight', count:14, startR:25, spacing:16, plate:220,
+    scaleErr:'', scaleErrColor:'', colorErr:'', colorErrColor:'', pathErr:'', pathErrColor:'', solveOut:'',
     s3nextDisabled:true,
     /* ----- step 4 ----- */
     swapSel:'No link selected — click “Select link in viewport”, then a link.',
@@ -1842,10 +2024,12 @@ function chainApp(){
       this.hasServer = hasServer;
       // seed the editor default functions from the current slider values
       S.scaleCode=DEFAULT_SCALE_CODE; S.scaleFn=compileScaleFn(DEFAULT_SCALE_CODE).fn;
-      S.pathCode=pathCodeFor(this.startR, this.spacing/(2*Math.PI)); S.pathFn=compilePathFn(S.pathCode).fn;
+      S.colorCode=DEFAULT_COLOR_CODE; S.colorFn=compileColorFn(DEFAULT_COLOR_CODE).fn;
+      S.pathCode=pathCodeFor(this.shape, this.startR, this.spacing/(2*Math.PI)); S.pathFn=compilePathFn(S.pathCode).fn;
 
       // reactive → engine bridges
       this.$watch('colorShades', ()=>applyColorShades());
+      this.$watch('purify', ()=>applyColorShades());
       this.$watch('pin.x', ()=>onAnchorChange());
       this.$watch('pin.y', ()=>onAnchorChange());
       this.$watch('pin.z', ()=>onAnchorChange());
@@ -1854,6 +2038,7 @@ function chainApp(){
       this.$watch('hole.z', ()=>onAnchorChange());
       this.$watch('partZ', v=>{ if(!this._loading) rotatePartZ(v); });
       this.$watch('count', ()=>{ if(!this._loading) debounceRegen(); });
+      this.$watch('shape', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
       this.$watch('startR', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
       this.$watch('spacing', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
       this.$watch('plate', ()=>{ if(!this._loading) debounceRegen(); });
@@ -1895,7 +2080,7 @@ function chainApp(){
       if(!anchorsValid())return;
       if(this.simAuto) await autoFitReduction(true);   // safety: ensure reduced before the first build
       markDone('s2'); unlock('s3'); openStep('s3');
-      ensureScaleEditor(); ensurePathEditor(); regen();
+      ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); regen();
     },
     s3Next(){
       markDone('s3'); unlock('s4'); openStep('s4');
@@ -1922,6 +2107,7 @@ function chainApp(){
     recheck(){ regen(true); },
     pathReset(){ regeneratePathFromSliders(); },
     scaleReset(){ if(scaleEditor)scaleEditor.setValue(DEFAULT_SCALE_CODE); else applyScaleCode(DEFAULT_SCALE_CODE); },
+    colorReset(){ if(colorEditor)colorEditor.setValue(DEFAULT_COLOR_CODE); else applyColorCode(DEFAULT_COLOR_CODE); },
 
     /* ---- render-mode + camera ---- */
     toggleXray(){ this.xray=!this.xray; applyXray(); },
