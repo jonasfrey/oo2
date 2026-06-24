@@ -17,6 +17,7 @@ import { repairGeometry } from './sculpt/MeshRepair.js';
 import { DisplacementController } from './heightmap/DisplacementController.js';
 import { HeightmapEditor }        from './heightmap/HeightmapEditor.js';
 import { EditHistory }            from './EditHistory.js';
+import { ViewCube }               from './ViewCube.js';
 
 // three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
 THREE.BufferGeometry.prototype.computeBoundsTree   = computeBoundsTree;
@@ -54,6 +55,7 @@ const CONST = {
 /* The Alpine component instance — set in init(). All reactive UI state lives on it;
    the engine reads/writes UI.* the way the old code read/wrote DOM elements. */
 let UI = null;
+let viewCube = null;        // corner orientation cube (set up after camera/controls exist)
 /* getElementById is still used for the few raw DOM nodes Alpine doesn't drive:
    the Monaco editor containers and the hidden <input type=file> elements. */
 const $ = id => document.getElementById(id);
@@ -123,7 +125,7 @@ function resize(){
 }
 new ResizeObserver(resize).observe(wrap); resize();
 
-(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera);})();
+(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera);viewCube&&viewCube.update();})();
 
 /* ================================ STATE ================================== */
 /* Engine state — Three.js object refs + non-reactive bookkeeping. UI-bound
@@ -323,18 +325,26 @@ function contentBounds(){
 }
 function setView(name){
   const {center,radius}=contentBounds();
-  const d=radius*3.0;
+  const d=radius*3.0, e=radius*0.001;     // tiny offset keeps Z-up from going degenerate top/bottom
   const off={
-    iso  :[d*0.62,-d*0.78,d*0.66],
-    top  :[0,-radius*0.001, d],
-    front:[0,-d,0],
-    side :[d,0,0],
+    iso   :[d*0.62,-d*0.78,d*0.66],
+    top   :[0,-e, d],                      // look down  +Z
+    bottom:[0, e,-d],                      // look up    -Z
+    front :[0,-d, 0],                      // look along -Y
+    back  :[0, d, 0],                      // look along +Y
+    right :[ d, 0, 0],                     // look along +X
+    left  :[-d, 0, 0],                     // look along -X
+    side  :[ d, 0, 0],                     // legacy alias for right
   }[name] || [d*0.62,-d*0.78,d*0.66];
   controls.target.copy(center);
   camera.position.set(center.x+off[0], center.y+off[1], center.z+off[2]);
   camera.updateProjectionMatrix();
   controls.update();
 }
+
+/* corner orientation cube — clicking a face snaps to that named view */
+viewCube = new ViewCube({ camera, controls, onSelect: name => setView(name) });
+document.getElementById('viewcube')?.appendChild(viewCube.domElement);
 
 /* ----- Bake an arbitrary Matrix4 into the base geometry (keeps mesh xform = I) ----- */
 function bakeMatrix(m){

@@ -66,16 +66,19 @@
   .chip{background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:20px;
     padding:5px 11px;font-size:12px;backdrop-filter:blur(4px)}
   .chip b{color:var(--ink)} .chip .ok{color:var(--accent2)} .chip .err{color:var(--bad)} .chip .warn{color:var(--warn)}
-  #viewbtns{position:absolute;right:14px;top:12px;z-index:4;display:flex;gap:4px}
+  #viewcube{position:absolute;right:14px;top:12px;z-index:4;width:96px;height:96px;
+    background:rgba(22,27,34,.6);border:1px solid var(--line);border-radius:8px;
+    overflow:hidden;backdrop-filter:blur(4px)}
+  #viewbtns{position:absolute;right:14px;top:118px;z-index:4;display:flex;gap:4px}
   #viewbtns button{background:rgba(22,27,34,.9);color:var(--ink);border:1px solid var(--line);
     border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600;backdrop-filter:blur(4px)}
   #viewbtns button:hover{border-color:var(--accent);color:var(--accent)}
-  #renderbtns{position:absolute;right:14px;top:46px;z-index:4;display:flex;gap:4px}
+  #renderbtns{position:absolute;right:14px;top:152px;z-index:4;display:flex;gap:4px}
   #renderbtns button{background:rgba(22,27,34,.9);color:var(--ink);border:1px solid var(--line);
     border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600;backdrop-filter:blur(4px)}
   #renderbtns button:hover{border-color:var(--accent);color:var(--accent)}
   #renderbtns button.on{background:var(--accent);color:#04263a;border-color:var(--accent)}
-  #sectionBar{position:absolute;right:14px;top:80px;z-index:4;display:flex;align-items:center;gap:8px;
+  #sectionBar{position:absolute;right:14px;top:186px;z-index:4;display:flex;align-items:center;gap:8px;
     background:rgba(22,27,34,.9);border:1px solid var(--line);border-radius:8px;padding:6px 10px;
     backdrop-filter:blur(4px);width:220px}
   #sectionBar input[type=range]{flex:1}
