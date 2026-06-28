@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf /tmp/claude-1000/-home-ubuntuuser-code-oo2/52761a01-9fa3-4a65-9273-5a28e0f8b85e/scratchpad/sctest)",
+      "Bash(mkdir -p /tmp/claude-1000/-home-ubuntuuser-code-oo2/52761a01-9fa3-4a65-9273-5a28e0f8b85e/scratchpad/sctest)",
+      "Bash(cp /home/ubuntuuser/code/oo2/setupclaudedocker.sh /tmp/claude-1000/-home-ubuntuuser-code-oo2/52761a01-9fa3-4a65-9273-5a28e0f8b85e/scratchpad/sctest/)",
+      "Bash(cd /tmp/claude-1000/-home-ubuntuuser-code-oo2/52761a01-9fa3-4a65-9273-5a28e0f8b85e/scratchpad/sctest)",
+      "Bash(bash setupclaudedocker.sh)",
+      "Bash(docker info *)",
+      "Bash(docker exec *)",
+      "Bash(docker network *)"
+    ]
+  }
+}

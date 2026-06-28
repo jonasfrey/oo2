@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { STLLoader }       from 'three/addons/loaders/STLLoader.js';
 import { PLYLoader }       from 'three/addons/loaders/PLYLoader.js';
 import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
@@ -100,6 +101,26 @@ renderer.domElement.addEventListener('wheel', e=>{
   controls.update();
 }, {passive:false});
 
+/* ---- swapped-link gizmo: move/rotate a custom override within its own slot ---- */
+const xform = new TransformControls(camera, renderer.domElement);
+xform.visible=false; xform.enabled=false;
+scene.add(xform);
+xform.addEventListener('dragging-changed', e=>{
+  controls.enabled = !e.value;
+  if(!e.value) commitGizmoAdjust();           // drag finished → persist + full recheck
+});
+xform.addEventListener('objectChange', liveGizmoAdjust);
+window.__debug={xform};   // TEMP: removed before commit
+
+/* ---- loop-sculpt direction gizmo + visibility group ---- */
+const lsXform = new TransformControls(camera, renderer.domElement);
+lsXform.visible = false; lsXform.enabled = false;
+lsXform.setMode('rotate');
+scene.add(lsXform);
+lsXform.addEventListener('dragging-changed', e => { controls.enabled = !e.value; });
+lsXform.addEventListener('objectChange', lsOnGizmoChange);
+const lsGroup = new THREE.Group(); lsGroup.visible = false; scene.add(lsGroup);
+
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202830, 1.1));
 const dir = new THREE.DirectionalLight(0xffffff, 1.4); dir.position.set(80,-120,200); scene.add(dir);
 
@@ -137,6 +158,7 @@ const S = {
   partMesh:null,         // single part shown in steps 1-2
   pickedNormal:null,     // world normal of picked face
   highlight:null,        // face highlight mesh
+  partX:0, partY:0,      // baked-in part rotation about X/Y (deg) — trackers for delta rotations
   partZ:0,               // baked-in part rotation about Z (deg) — tracker for delta rotations
   alignMatrix:new THREE.Matrix4(),   // cumulative rotation baked into baseGeo (auto-align/lay-flat/Z-nudge) —
                                       // reapplied (rotation only) to any link-swap upload, so it shares the same orientation
@@ -169,6 +191,11 @@ const S = {
   uiStep:'s1',           // which wizard step's view is showing (drives part-vs-chain visibility)
   dbgPoints:null, dbgWire:null,
   chainLength:0, linkSpan:0,
+  lsNodes:[],           // loop sculpt nodes [{pos,dir,intensity,radius,mode,falloff,code,fn,arrowHelper,sphereViz,pivot}]
+  lsPreviewGeo:null,    // cloned geo currently shown as deformed preview in the lsculpt step
+  lsActiveNodeIdx:-1,   // which node is selected for editing
+  lsChainGroup:null,    // THREE.Group with one deformed Mesh per link (replaces S.chain visually)
+  mirroredBaseGeo:null, // cached full-part geometry built from the half-part when mirror is enabled
 };
 
 /* ======================================================================== *
@@ -278,6 +305,7 @@ function setBaseGeometry(geo, opts={}){
   S.appliedPct=0;
   UI.simResetDisabled=true; UI.simPct=0;
   if (S.baseGeo){ S.baseGeo.disposeBoundsTree?.(); S.baseGeo.dispose(); }
+  if (S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
 
   S.baseGeo = geo;
   history?.clear();                          // new part → drop any prior undo history
@@ -296,6 +324,14 @@ function setBaseGeometry(geo, opts={}){
   if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();   // show the recommended reduction
   UI.s1nextDisabled=false;
   UI.dropHide=true;                         // load done → drop the overlay
+  // run half-part detection and seed the mirror controls
+  const _det=detectHalfPart();
+  if(_det){
+    UI.mirrorDetectOut=`<b style="color:var(--ok)">Flat cut face detected</b> on <b>${_det.axis.toUpperCase()}</b> axis (${(_det.pct*100).toFixed(0)}% of vertices coplanar) — this looks like a half-part. Enable <i>Mirror half</i> below.`;
+    UI.mirrorAxis=_det.axis; UI.mirrorOffset=+_det.offset.toFixed(3);
+  } else {
+    UI.mirrorDetectOut=`<span style="color:#888">No flat cut face detected — appears to be a full mesh.</span>`;
+  }
   status('Part loaded. Auto-align, then pick the face to lay flat.','ok');
 }
 
@@ -317,7 +353,8 @@ function frameCamera(){
 
 function contentBounds(){
   const box=new THREE.Box3();
-  if(S.chain&&S.chain.visible){ box.setFromObject(S.chain); }
+  if(S.lsChainGroup&&S.lsChainGroup.visible){ box.setFromObject(S.lsChainGroup); }
+  else if(S.chain&&S.chain.visible){ box.setFromObject(S.chain); }
   else if(S.baseGeo){ S.baseGeo.computeBoundingBox(); box.copy(S.baseGeo.boundingBox); }
   else { box.set(new THREE.Vector3(-60,-60,0),new THREE.Vector3(60,60,60)); }
   return { center:box.getCenter(new THREE.Vector3()),
@@ -653,6 +690,15 @@ function undoCutFlat(){
   S.geoPreCut.dispose(); S.geoPreCut=null; UI.hasCutUndo=false;
   S.meshDirty=true; regen(); frameCamera();
   status('Cut undone.','ok');
+}
+
+function centerPart(){
+  if(!S.baseGeo) return;
+  S.baseGeo.computeBoundingBox();
+  const c=S.baseGeo.boundingBox.getCenter(new THREE.Vector3());
+  bakeMatrix(new THREE.Matrix4().makeTranslation(-c.x,-c.y,-c.z));
+  frameCamera();
+  status('Part centered at (0, 0, 0).','ok');
 }
 
 function alignInPlane(){
@@ -1145,17 +1191,147 @@ function paintChain(poses, bad){
   if(S.chain.instanceColor) S.chain.instanceColor.needsUpdate=true;
   if(vc) S.baseGeo.setAttribute('aSwap', new THREE.InstancedBufferAttribute(swapArr,1));
 }
+/* ======================================================================== *
+ *  MIRROR HALF — build a full symmetric part from a half-mesh at chain time
+ * ======================================================================== */
+function detectHalfPart(){
+  if(!S.baseGeo) return null;
+  S.baseGeo.computeBoundingBox();
+  const bb=S.baseGeo.boundingBox;
+  const pos=S.baseGeo.getAttribute('position');
+  const n=pos.count;
+  let best=null;
+  for(let axIdx=0;axIdx<3;axIdx++){
+    const axName=['x','y','z'][axIdx];
+    const min=bb.min[axName], max=bb.max[axName];
+    const span=max-min; if(span<0.001) continue;
+    const eps=span*0.015;
+    let atMin=0, atMax=0;
+    for(let i=0;i<n;i++){
+      const v=pos.getComponent(i,axIdx);
+      if(Math.abs(v-min)<eps) atMin++;
+      if(Math.abs(v-max)<eps) atMax++;
+    }
+    for(const [cnt,offset] of [[atMin,min],[atMax,max]]){
+      const pct=cnt/n;
+      if(!best||pct>best.pct) best={axis:axName,axIdx,offset,pct};
+    }
+  }
+  return (best&&best.pct>=0.08)?best:null;
+}
+
+function buildMirroredGeo(srcGeo){
+  const axIdx=UI.mirrorAxis==='x'?0:UI.mirrorAxis==='y'?1:2;
+  const off=UI.mirrorOffset;
+  // always non-indexed so winding flip is straightforward
+  const orig=srcGeo.index?srcGeo.toNonIndexed():srcGeo.clone();
+  const half2=orig.clone();
+  // reflect positions
+  const pos=half2.getAttribute('position');
+  for(let i=0;i<pos.count;i++) pos.setComponent(i,axIdx,2*off-pos.getComponent(i,axIdx));
+  pos.needsUpdate=true;
+  // reverse winding (swap vertex 0 ↔ vertex 2 in every tri) for all attributes except normals
+  for(const [name,attr] of Object.entries(half2.attributes)){
+    if(name==='normal') continue;
+    const arr=attr.array, sz=attr.itemSize;
+    for(let t=0;t<pos.count;t+=3){
+      for(let c=0;c<sz;c++){
+        const tmp=arr[t*sz+c]; arr[t*sz+c]=arr[(t+2)*sz+c]; arr[(t+2)*sz+c]=tmp;
+      }
+    }
+    attr.needsUpdate=true;
+  }
+  half2.computeVertexNormals();
+  let merged;
+  try{ merged=BufferGeometryUtils.mergeGeometries([orig,half2],false); }
+  catch(e){ orig.dispose(); half2.dispose(); return srcGeo.clone(); }
+  orig.dispose(); half2.dispose();
+  const welded=BufferGeometryUtils.mergeVertices(merged,0.01);
+  merged.dispose();
+  welded.computeVertexNormals(); welded.computeBoundingBox(); welded.computeBoundingSphere();
+  welded.disposeBoundsTree?.(); welded.boundsTree=null;
+  return welded;
+}
+
+function getMirroredLSNodes(){
+  const ax=UI.mirrorAxis, off=UI.mirrorOffset;
+  return S.lsNodes.map(n=>{
+    const pos=n.pos.clone(), dir=n.dir.clone();
+    if(ax==='x'){ pos.x=2*off-pos.x; dir.x=-dir.x; }
+    else if(ax==='y'){ pos.y=2*off-pos.y; dir.y=-dir.y; }
+    else { pos.z=2*off-pos.z; dir.z=-dir.z; }
+    return {...n,pos,dir};
+  });
+}
+
+function updateMirroredBase(){
+  if(S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
+  if(UI&&UI.mirrorEnabled&&S.baseGeo) S.mirroredBaseGeo=buildMirroredGeo(S.baseGeo);
+}
+let mirrorRegenTimer=null;
+function debounceMirrorRegen(){
+  clearTimeout(mirrorRegenTimer);
+  mirrorRegenTimer=setTimeout(()=>{ updateMirroredBase(); if(S.poses.length) regen(); },250);
+}
+
+function disposeLSChainGroup(){
+  if(!S.lsChainGroup) return;
+  scene.remove(S.lsChainGroup);
+  S.lsChainGroup.traverse(o=>{ if(o.isMesh){ o.geometry.dispose(); o.material.dispose(); } });
+  S.lsChainGroup=null;
+}
+
+function buildLSChainGroup(poses){
+  disposeLSChainGroup();
+  if(!S.lsNodes.length || !poses.length) return;
+  const N=poses.length, vc=hasVColor(S.baseGeo);
+  const group=new THREE.Group();
+  for(let i=0;i<N;i++){
+    if(S.overrides.has(i)) continue;   // overrideGroup handles custom slots
+    const nor=N>1?i/(N-1):0;
+    // use cached mirrored base if mirror is enabled (much faster than rebuilding per link)
+    const geo=(UI&&UI.mirrorEnabled&&S.mirroredBaseGeo)?S.mirroredBaseGeo.clone():linkGeom(i).clone();
+    applyLSDeform(geo,i,nor);
+    const base=vc?WHITE:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR);
+    linkPaint(i,N,base,vc);            // writes result into _tmpCol
+    const mat=new THREE.MeshStandardMaterial({color:_tmpCol.clone(),metalness:0.05,roughness:0.7});
+    const mesh=new THREE.Mesh(geo,mat);
+    linkWorldMatrix(i).decompose(mesh.position,mesh.quaternion,mesh.scale);
+    mesh.userData.linkIndex=i;
+    group.add(mesh);
+  }
+  S.lsChainGroup=group;
+  scene.add(group);
+}
+
+function recolorLSChain(bad){
+  if(!S.lsChainGroup) return;
+  const N=S.poses.length, vc=hasVColor(S.baseGeo);
+  for(const mesh of S.lsChainGroup.children){
+    const i=mesh.userData.linkIndex;
+    if(bad&&bad.has(i)){ mesh.material.color.copy(CONST.LINK_BAD_COLOR); continue; }
+    const base=vc?WHITE:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR);
+    linkPaint(i,N,base,vc);
+    mesh.material.color.copy(_tmpCol);
+  }
+}
+
 function renderChain(poses){
   if(S.chain){scene.remove(S.chain);S.chain.dispose();}
-  const mat=partMaterial(S.baseGeo,{roughness:.7});
-  if(hasVColor(S.baseGeo)) installSwapShader(mat);   // enable per-part colour swap on coloured models
-  S.chain=new THREE.InstancedMesh(S.baseGeo, mat, poses.length);
+  disposeLSChainGroup();
+  const chainGeo=(UI&&UI.mirrorEnabled&&S.mirroredBaseGeo)?S.mirroredBaseGeo:S.baseGeo;
+  const mat=partMaterial(chainGeo,{roughness:.7});
+  if(hasVColor(chainGeo)) installSwapShader(mat);
+  S.chain=new THREE.InstancedMesh(chainGeo, mat, poses.length);
   S.chain.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   for(let i=0;i<poses.length;i++)
     S.chain.setMatrixAt(i, S.overrides.has(i)?_HIDDEN:poses[i]);   // custom slots drawn separately
   S.chain.instanceMatrix.needsUpdate=true;
   paintChain(poses, null);
   scene.add(S.chain);
+  buildLSChainGroup(poses);   // per-link deformed meshes (empty if no nodes)
+  // when loop sculpt is active, hide the shared instanced mesh so only the deformed group shows
+  S.chain.visible = !S.lsNodes.length;
   rebuildOverrideMeshes(poses);
   if(S.partMesh)S.partMesh.visible=false;
   if(pinGizmo)pinGizmo.visible=false; if(holeGizmo)holeGizmo.visible=false;
@@ -1176,7 +1352,7 @@ function worldAABB(pose,geo){
 }
 function checkCollisions(poses){
   const n=poses.length;
-  const boxes=poses.map((p,i)=>worldAABB(p,linkGeom(i)));
+  const boxes=poses.map((p,i)=>worldAABB(linkWorldMatrix(i),linkGeom(i)));   // honors any gizmo nudge on a swapped link
   let cell=0; const sz=new THREE.Vector3();
   for(const b of boxes){b.getSize(sz);cell=Math.max(cell,sz.x,sz.y);}
   cell=Math.max(cell,1e-3);
@@ -1197,7 +1373,7 @@ function checkCollisions(poses){
       const pk=i*n+j; if(tested.has(pk))continue; tested.add(pk);   // dedupe multi-cell pairs
       if(!boxes[i].intersectsBox(boxes[j]))continue;
       pairs++;
-      inv.copy(poses[i]).invert().multiply(poses[j]);               // bring link j into link i's frame
+      inv.copy(linkWorldMatrix(i)).invert().multiply(linkWorldMatrix(j));   // bring link j into link i's frame
       if(linkGeom(i).boundsTree.intersectsGeometry(linkGeom(j),inv)){ bad.add(i); bad.add(j); }
     }
   }
@@ -1219,8 +1395,9 @@ function regen(force){
   if(doCheck) ({bad,pairs}=checkCollisions(poses));
   S.collideSet=bad;
   paintChain(poses, bad);            // re-tint, flagging collisions red
+  recolorLSChain(bad);
   recolorOverrides(bad); showSelection();
-  const fp=new THREE.Box3(); poses.forEach((p,i)=>fp.union(worldAABB(p,linkGeom(i))));
+  const fp=new THREE.Box3(); poses.forEach((p,i)=>fp.union(worldAABB(linkWorldMatrix(i),linkGeom(i))));
   const fs=fp.getSize(new THREE.Vector3());
   const plate=P().plate;
   const off = fs.x>plate||fs.y>plate;
@@ -1296,8 +1473,11 @@ async function exportChain(){
   const keepColor = fmt!=='stl' && hasVColor(S.baseGeo);   // STL has no color; every other format keeps it
   const geos=[];
   for(let i=0;i<S.poses.length;i++){
-    const g=linkGeom(i).clone();     // base part, or this slot's custom model
-    g.applyMatrix4(S.poses[i]);      // bake world matrix → separate solid
+    let g=(UI.mirrorEnabled&&!S.overrides.has(i)&&S.mirroredBaseGeo)
+      ? S.mirroredBaseGeo.clone()    // full symmetric part for non-overridden slots
+      : linkGeom(i).clone();         // base or custom model as usual
+    if(S.lsNodes.length){ const nor=S.poses.length>1?i/(S.poses.length-1):0; applyLSDeform(g,i,nor); }
+    g.applyMatrix4(linkWorldMatrix(i));      // bake world matrix (incl. any gizmo nudge) → separate solid
     for(const a of Object.keys(g.attributes)) if(a!=='position'&&a!=='normal'&&!(keepColor&&a==='color')) g.deleteAttribute(a);
     if(keepColor && !g.getAttribute('color'))   // an uncolored override → white-fill so the merge's attrs match
       g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count*3).fill(1),3));
@@ -1387,12 +1567,15 @@ function geoFromArrays(pos,nrm,idx){
 
 function gatherConfig(opts={}){
   const cfg={
-    version:4, pin:{x:UI.pin.x,y:UI.pin.y,z:UI.pin.z||0}, hole:{x:UI.hole.x,y:UI.hole.y,z:UI.hole.z||0}, partZ:UI.partZ,
+    version:4, pin:{x:UI.pin.x,y:UI.pin.y,z:UI.pin.z||0}, hole:{x:UI.hole.x,y:UI.hole.y,z:UI.hole.z||0}, partX:UI.partX, partY:UI.partY, partZ:UI.partZ,
     params:P(),
     scaleCode:S.scaleCode,
     colorCode:S.colorCode,
     pathCode:S.pathCode,
     symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
+    mirror:{enabled:UI.mirrorEnabled,axis:UI.mirrorAxis,offset:UI.mirrorOffset},
+    lsNodes:S.lsNodes.map(n=>({pos:[n.pos.x,n.pos.y,n.pos.z],dir:[n.dir.x,n.dir.y,n.dir.z],
+      intensity:n.intensity,radius:n.radius,mode:n.mode,falloff:n.falloff,code:n.code})),
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
   };
   if(opts.inlineGeometry && S.baseGeo){
@@ -1404,6 +1587,7 @@ function gatherConfig(opts={}){
     cfg.overrides=[...S.overrides].map(([i,o])=>{
       const e={index:i, name:o.name||('link '+i)};
       if(o.meshId) e.meshId=o.meshId;
+      if(o.adjust && !o.adjust.equals(new THREE.Matrix4())) e.adjust=o.adjust.toArray();
       if(opts.inlineGeometry){
         e.geometry=Array.from(o.geo.attributes.position.array);
         const n=o.geo.getAttribute('normal'); if(n) e.normals=Array.from(n.array);
@@ -1433,6 +1617,8 @@ async function applyConfig(cfg){
     S.meshDirty=false;                          // whatever we just loaded is the current saved mesh
     if(cfg.pin) Object.assign(UI.pin,cfg.pin);
     if(cfg.hole) Object.assign(UI.hole,cfg.hole);
+    S.partX=cfg.partX||0; UI.partX=S.partX;
+    S.partY=cfg.partY||0; UI.partY=S.partY;
     S.partZ=cfg.partZ||0; UI.partZ=S.partZ;
     const p=cfg.params||{};
     if(p.shape!=null)UI.shape=p.shape;
@@ -1441,6 +1627,23 @@ async function applyConfig(cfg){
     if(Array.isArray(cfg.symPlanes)){
       S.symPlanes=cfg.symPlanes.map(pl=>({p:new THREE.Vector3(...pl.p),n:new THREE.Vector3(...pl.n),score:0}));
       buildSymLines();
+    }
+    if(cfg.mirror){
+      UI.mirrorEnabled=!!cfg.mirror.enabled;
+      UI.mirrorAxis=cfg.mirror.axis||'x';
+      UI.mirrorOffset=cfg.mirror.offset||0;
+      if(UI.mirrorEnabled) updateMirroredBase();
+    }
+    if(Array.isArray(cfg.lsNodes) && cfg.lsNodes.length){
+      lsClearAll();
+      for(const n of cfg.lsNodes){
+        // set UI values so lsAddNode picks them up for the arrow/sphere sizing
+        if(UI){ UI.lsRadius=n.radius; UI.lsIntensity=n.intensity;
+                UI.lsMode=n.mode; UI.lsFalloff=n.falloff; UI.lsCode=n.code; }
+        const node=lsAddNode(new THREE.Vector3(...n.pos), new THREE.Vector3(...n.dir));
+        if(node){ node.fn=compileLSFn(n.code); }
+      }
+      lsSelectNode(-1); lsSyncNodeList(); // deselect after loading; user picks up from the list
     }
     if(typeof cfg.scaleCode==='string'){
       S.scaleCode=cfg.scaleCode;
@@ -1463,12 +1666,13 @@ async function applyConfig(cfg){
           let g=null;
           if(e.meshId) g=await fetchMeshGeom(e.meshId);
           else if(Array.isArray(e.geometry)) g=geoFromArrays(e.geometry,e.normals,e.indices);
-          if(g) S.overrides.set(e.index,{geo:g,name:e.name||('link '+e.index),meshId:e.meshId||null});
+          const adjust=Array.isArray(e.adjust)?new THREE.Matrix4().fromArray(e.adjust):new THREE.Matrix4();
+          if(g) S.overrides.set(e.index,{geo:g,name:e.name||('link '+e.index),meshId:e.meshId||null,adjust});
         }catch(err){ status('A swapped link failed to load: '+err.message,'err'); }
       }
       updateSwapUI();
     }
-    markDone('s1'); unlock('s2'); unlock('s3'); buildGizmos();
+    markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('s2'); unlock('s3'); buildGizmos();
     setAnchorRanges();
     ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); openStep('s3'); regen();
     UI.dropHide=true;
@@ -1624,18 +1828,19 @@ function maybeHide(){ if(UI&&S.baseGeo) UI.dropHide=true; }
  *  RENDER MODES — X-RAY · SECTION/LAYER VIEW · MATING PREVIEW · SIMPLIFY
  * ======================================================================== */
 function overrideMaterials(){ return S.overrideGroup ? S.overrideGroup.children.map(c=>c.material) : []; }
+function lsChainMaterials(){ return S.lsChainGroup ? S.lsChainGroup.children.map(c=>c.material) : []; }
 function clipMaterials(){
   const o=[];
   if(S.partMesh)    o.push(S.partMesh.material);
   if(S.chain)       o.push(S.chain.material);
   if(S.matePreview) o.push(S.matePreview.material);
-  return o.concat(overrideMaterials());
+  return o.concat(overrideMaterials(), lsChainMaterials());
 }
 function xrayMaterials(){
   const o=[];
   if(S.partMesh) o.push(S.partMesh.material);
   if(S.chain)    o.push(S.chain.material);
-  return o.concat(overrideMaterials());
+  return o.concat(overrideMaterials(), lsChainMaterials());
 }
 
 function updatePartEdges(){
@@ -1653,7 +1858,7 @@ function updateDebugViz(){
   if(S.dbgPoints){ scene.remove(S.dbgPoints); S.dbgPoints.material.dispose(); S.dbgPoints=null; }   // geometry is the shared baseGeo — don't dispose
   if(S.dbgWire){ scene.remove(S.dbgWire); S.dbgWire.geometry.dispose(); S.dbgWire.material.dispose(); S.dbgWire=null; }
   if(S.baseGeo){
-    const partMode = S.uiStep==='s1'||S.uiStep==='s2'||S.uiStep==='proj'||S.uiStep==='sculpt'||S.uiStep==='height';
+    const partMode = S.uiStep==='s1'||S.uiStep==='s2'||S.uiStep==='proj'||S.uiStep==='sculpt'||S.uiStep==='height'||S.uiStep==='lsculpt';
     const r=(S.baseGeo.boundingSphere&&S.baseGeo.boundingSphere.radius)||40;
     if(UI.showVerts){
       S.dbgPoints=new THREE.Points(S.baseGeo,new THREE.PointsMaterial({color:0x7ee787,size:Math.max(0.3,r*0.012),sizeAttenuation:true,depthTest:false}));
@@ -1892,7 +2097,7 @@ async function autoFitReduction(apply){
   if(!S.baseGeo) return;
   const cap=Math.max(50,(UI.simMaxVerts||CONST.MAX_VERTS_PER_LINK));
   const full=baseVertCount();
-  UI.simPct = full>cap ? Math.min(99,Math.round(100*(1-cap/full))) : 0;
+  UI.simPct = full>cap ? Math.min(98,Math.round(100*(1-cap/full))) : 0;
   updateSimEstimate();
   if(!apply) return;
   if(full<=cap){ if(S.appliedPct>0) restoreDetail(); return; }
@@ -1930,40 +2135,87 @@ function fitReplacement(geo){
   geo.computeVertexNormals(); geo.computeBoundingBox(); geo.computeBoundingSphere();
   return geo;
 }
+/* Effective world matrix for a link's slot, including any manual gizmo nudge on a swapped-in part. */
+function linkWorldMatrix(i){
+  const o=S.overrides.get(i);
+  if(o && o.adjust) return new THREE.Matrix4().multiplyMatrices(S.poses[i],o.adjust);
+  return S.poses[i];
+}
 function rebuildOverrideMeshes(poses){
   if(S.overrideGroup){ scene.remove(S.overrideGroup); S.overrideGroup.traverse(o=>o.material&&o.material.dispose()); }
   S.overrideGroup=new THREE.Group(); scene.add(S.overrideGroup);
   for(const [i,o] of S.overrides){
     if(i>=poses.length) continue;
+    if(!o.adjust) o.adjust=new THREE.Matrix4();
     const m=new THREE.Mesh(o.geo,new THREE.MeshStandardMaterial({color:CONST.OVERRIDE_COLOR,metalness:.1,roughness:.7}));
-    m.matrixAutoUpdate=false; m.matrix.copy(poses[i]); m.updateMatrixWorld(true);
+    new THREE.Matrix4().multiplyMatrices(poses[i],o.adjust).decompose(m.position,m.quaternion,m.scale);
+    m.updateMatrixWorld(true);
     m.userData.linkIndex=i; S.overrideGroup.add(m);
   }
+  syncGizmoAttachment();
 }
 function recolorOverrides(bad){
   if(!S.overrideGroup) return;
   for(const m of S.overrideGroup.children)
     m.material.color.copy(bad&&bad.has(m.userData.linkIndex)?CONST.LINK_BAD_COLOR:CONST.OVERRIDE_COLOR);
 }
-function clearOverride(i){ const o=S.overrides.get(i); if(o){ o.geo.disposeBoundsTree?.(); o.geo.dispose(); } S.overrides.delete(i); }
+function clearOverride(i){
+  const o=S.overrides.get(i); if(o){ o.geo.disposeBoundsTree?.(); o.geo.dispose(); } S.overrides.delete(i);
+  if(xform.object && xform.object.userData.linkIndex===i) xform.detach();
+}
 
 function showSelection(){
   if(S.selBox){ scene.remove(S.selBox); S.selBox=null; }
   if(S.selectedLink==null || !S.poses[S.selectedLink]) return;
-  S.selBox=new THREE.Box3Helper(worldAABB(S.poses[S.selectedLink],linkGeom(S.selectedLink)),CONST.SELECT_COLOR);
+  S.selBox=new THREE.Box3Helper(worldAABB(linkWorldMatrix(S.selectedLink),linkGeom(S.selectedLink)),CONST.SELECT_COLOR);
   scene.add(S.selBox);
 }
 function selectLinkAt(ev){
-  if(!S.chain){ status('Build the chain first.','warn'); return; }
+  if(!S.chain&&!S.lsChainGroup){ status('Build the chain first.','warn'); return; }
   pointerNDC(ev);
   const hits=[];
-  const ch=raycaster.intersectObject(S.chain,false)[0];
-  if(ch&&ch.instanceId!=null) hits.push({d:ch.distance,i:ch.instanceId});
+  if(S.chain&&S.chain.visible){
+    const ch=raycaster.intersectObject(S.chain,false)[0];
+    if(ch&&ch.instanceId!=null) hits.push({d:ch.distance,i:ch.instanceId});
+  }
+  if(S.lsChainGroup&&S.lsChainGroup.visible){
+    for(const h of raycaster.intersectObjects(S.lsChainGroup.children,false)) hits.push({d:h.distance,i:h.object.userData.linkIndex});
+  }
   if(S.overrideGroup) for(const h of raycaster.intersectObjects(S.overrideGroup.children,false)) hits.push({d:h.distance,i:h.object.userData.linkIndex});
   if(!hits.length){ status('No link under the cursor — click directly on a link.','warn'); return; }
   hits.sort((a,b)=>a.d-b.d);
-  S.selectedLink=hits[0].i; showSelection(); updateSwapUI();
+  S.selectedLink=hits[0].i; showSelection(); updateSwapUI(); syncGizmoAttachment();
   status('Selected link #'+S.selectedLink+'.');
+}
+/* ---- gizmo: attach to the selected link's override mesh, only while step 4 is open ---- */
+function syncGizmoAttachment(){
+  const i=S.selectedLink;
+  const mesh = (i!=null && S.overrideGroup) ? S.overrideGroup.children.find(c=>c.userData.linkIndex===i) : null;
+  const want = mesh && S.uiStep==='s4';
+  if(want){ xform.attach(mesh); xform.enabled=true; xform.visible=true; }
+  else { xform.detach(); xform.enabled=false; xform.visible=false; }
+  if(UI) UI.gizmoActive=!!want;
+}
+function liveGizmoAdjust(){
+  const mesh=xform.object; if(!mesh) return;
+  mesh.updateMatrix();                              // bake the drag's position/quaternion into .matrix now
+  const o=S.overrides.get(mesh.userData.linkIndex); if(!o) return;
+  o.adjust.multiplyMatrices(new THREE.Matrix4().copy(S.poses[mesh.userData.linkIndex]).invert(), mesh.matrix);
+  showSelection();                                   // cheap visual feedback while dragging
+}
+function commitGizmoAdjust(){
+  if(!xform.object) return;
+  liveGizmoAdjust();
+  regen();                                           // full collision recheck + stats, now that the drag is done
+  syncGizmoAttachment();                             // regen() rebuilt the mesh — reattach to the fresh one
+}
+function gizmoSetMode(mode){ xform.setMode(mode); if(UI) UI.gizmoMode=mode; }
+function gizmoResetAdjust(){
+  if(S.selectedLink==null) return;
+  const o=S.overrides.get(S.selectedLink); if(!o) return;
+  o.adjust.identity();
+  regen(); syncGizmoAttachment();
+  status('Adjustment reset.','ok');
 }
 function updateSwapUI(){
   const has=S.selectedLink!=null;
@@ -1981,7 +2233,7 @@ function replaceSelectedLink(file){
   const r=new FileReader();
   r.onload=()=>parseMeshFile(r.result,file.name).then(g=>{
     clearOverride(idx);
-    S.overrides.set(idx,{geo:fitReplacement(g),name:file.name,meshId:null});   // meshId filled in on save
+    S.overrides.set(idx,{geo:fitReplacement(g),name:file.name,meshId:null,adjust:new THREE.Matrix4()});   // meshId filled in on save
     regen(); showSelection(); updateSwapUI(); updateSimEstimate();
     status(`Link #${idx} → “${file.name}”.`,'ok');
   }).catch(e=>status('Replace failed: '+e.message,'err'));
@@ -1995,26 +2247,267 @@ function openStep(id){ if(UI){ UI.openId=id; UI.activeId=id; } showStepView(id);
 function unlock(id){ if(UI)UI.steps[id].locked=false; }
 function markDone(id){ if(UI)UI.steps[id].done=true; }
 
+/* ======================================================================== *
+ *  LOOP SCULPTING (optional step) — per-link progressive deformation
+ *  Nodes are stored as metadata; deformation is applied during export.
+ *  The preview slider lets users audition any single link's shape.
+ * ======================================================================== */
+const LS_COL_IDLE   = 0x00e5a0;
+const LS_COL_ACTIVE = 0xffcc00;
+
+function compileLSFn(code){
+  try{ const fn=new Function('n_it','n_it_nor',code); fn(0,0); return fn; }
+  catch(e){ return null; }
+}
+
+function applyLSDeform(geo, n_it, n_it_nor){
+  if(!S.lsNodes.length) return;
+  const nodes = (UI&&UI.mirrorEnabled&&S.lsNodes.length)
+    ? [...S.lsNodes, ...getMirroredLSNodes()]
+    : S.lsNodes;
+  const pos=geo.getAttribute('position');
+  const nrm=geo.getAttribute('normal');
+  const n=pos.count;
+  const v=new THREE.Vector3(), d=new THREE.Vector3();
+  for(let vi=0;vi<n;vi++){
+    v.fromBufferAttribute(pos,vi);
+    for(const node of nodes){
+      const dist=v.distanceTo(node.pos);
+      if(dist>node.radius) continue;
+      const r=dist/node.radius;
+      let fall;
+      switch(node.falloff){
+        case 'linear':   fall=1-r; break;
+        case 'gaussian': fall=Math.exp(-r*r*4); break;
+        case 'cosine':   fall=(1+Math.cos(r*Math.PI))*0.5; break;
+        default:         fall=(1-r)*(1-r); break; // smooth quadratic
+      }
+      let t=n_it_nor;
+      try{ const rv=node.fn?+node.fn(n_it,n_it_nor):n_it_nor; t=isFinite(rv)?rv:n_it_nor; }catch(e){}
+      switch(node.mode){
+        case 'inflate':
+          d.set(nrm?nrm.getX(vi):node.dir.x, nrm?nrm.getY(vi):node.dir.y, nrm?nrm.getZ(vi):node.dir.z)
+           .multiplyScalar(node.intensity*t*fall);
+          break;
+        case 'pinch':
+          d.copy(node.pos).sub(v);
+          if(d.lengthSq()>1e-8) d.normalize();
+          d.multiplyScalar(node.intensity*t*fall);
+          break;
+        default: // push
+          d.copy(node.dir).multiplyScalar(node.intensity*t*fall);
+      }
+      pos.setXYZ(vi, pos.getX(vi)+d.x, pos.getY(vi)+d.y, pos.getZ(vi)+d.z);
+    }
+  }
+  pos.needsUpdate=true;
+  geo.computeVertexNormals(); geo.computeBoundingBox(); geo.computeBoundingSphere();
+  geo.disposeBoundsTree?.(); geo.boundsTree=null;
+}
+
+function lsMakeArrow(pos, dir, radius, color){
+  const len=radius*1.4;
+  const ah=new THREE.ArrowHelper(dir.clone().normalize(), pos.clone(), len, color, len*0.28, len*0.14);
+  ah.renderOrder=998;
+  return ah;
+}
+
+function lsMakeSphere(pos, radius, color){
+  const g=new THREE.SphereGeometry(radius,16,8);
+  const m=new THREE.MeshBasicMaterial({color,wireframe:true,transparent:true,opacity:0.18,depthTest:false});
+  const mesh=new THREE.Mesh(g,m); mesh.position.copy(pos); mesh.renderOrder=997;
+  return mesh;
+}
+
+function lsAddNode(pos, initialDir){
+  if(!UI||!S.baseGeo) return null;
+  S.baseGeo.computeBoundingBox();
+  const bb=S.baseGeo.boundingBox, sz=bb.getSize(new THREE.Vector3());
+  const defaultRadius=Math.max(sz.x,sz.y,sz.z)*0.25;
+  const radius=UI.lsRadius||defaultRadius;
+  const intensity=UI.lsIntensity||5;
+  const mode=UI.lsMode||'push';
+  const falloff=UI.lsFalloff||'smooth';
+  const code=UI.lsCode||'return n_it_nor;';
+
+  const dir=(initialDir&&initialDir.lengthSq()>0)?initialDir.clone().normalize():new THREE.Vector3(0,0,1);
+
+  const pivot=new THREE.Object3D();
+  pivot.position.copy(pos);
+  const base=new THREE.Vector3(0,0,1);
+  if(Math.abs(dir.dot(base))<0.999) pivot.quaternion.setFromUnitVectors(base,dir);
+  lsGroup.add(pivot);
+
+  const arrowHelper=lsMakeArrow(pos,dir,radius,LS_COL_IDLE);
+  const sphereViz=lsMakeSphere(pos,radius,LS_COL_IDLE);
+  lsGroup.add(arrowHelper,sphereViz);
+
+  const node={pos:pos.clone(),dir,intensity,radius,mode,falloff,code,fn:compileLSFn(code),
+              arrowHelper,sphereViz,pivot};
+  S.lsNodes.push(node);
+  lsSelectNode(S.lsNodes.length-1);
+  lsSyncNodeList();
+  lsPreviewUpdate();
+  return node;
+}
+
+function lsSelectNode(idx){
+  S.lsActiveNodeIdx=idx;
+  if(UI) UI.lsActiveNode=idx;
+  for(let i=0;i<S.lsNodes.length;i++){
+    const active=i===idx, col=active?LS_COL_ACTIVE:LS_COL_IDLE;
+    const nd=S.lsNodes[i];
+    nd.arrowHelper.setColor(col);
+    nd.sphereViz.material.color.setHex(col);
+  }
+  if(idx<0||idx>=S.lsNodes.length){
+    lsXform.detach(); lsXform.visible=false; lsXform.enabled=false; return;
+  }
+  const node=S.lsNodes[idx];
+  lsXform.setMode(UI ? UI.lsGizmoMode : 'rotate');
+  lsXform.attach(node.pivot); lsXform.visible=true; lsXform.enabled=true;
+  if(UI){
+    UI.lsIntensity=node.intensity; UI.lsRadius=node.radius;
+    UI.lsMode=node.mode; UI.lsFalloff=node.falloff; UI.lsCode=node.code;
+  }
+}
+
+function lsDeleteNode(idx){
+  if(idx<0||idx>=S.lsNodes.length) return;
+  const nd=S.lsNodes[idx];
+  lsGroup.remove(nd.arrowHelper,nd.sphereViz,nd.pivot);
+  nd.arrowHelper.line.geometry.dispose(); nd.arrowHelper.cone.geometry.dispose();
+  nd.sphereViz.geometry.dispose(); nd.sphereViz.material.dispose();
+  S.lsNodes.splice(idx,1);
+  const next=S.lsNodes.length>0?Math.min(idx,S.lsNodes.length-1):-1;
+  lsSelectNode(next);
+  lsSyncNodeList(); lsPreviewUpdate();
+}
+
+function lsSyncNodeList(){
+  if(!UI) return;
+  UI.lsNodes=S.lsNodes.map((n,i)=>({
+    idx:i,
+    label:`Node ${i+1} · ${n.mode} · ±${n.intensity}mm · r=${n.radius}mm`,
+  }));
+}
+
+function lsUpdateActiveNode(){
+  const idx=S.lsActiveNodeIdx;
+  if(idx<0||idx>=S.lsNodes.length||!UI) return;
+  const node=S.lsNodes[idx];
+  node.intensity=UI.lsIntensity;
+  node.radius=UI.lsRadius;
+  node.mode=UI.lsMode;
+  node.falloff=UI.lsFalloff;
+
+  // rebuild arrow + sphere with new radius/color
+  const col=LS_COL_ACTIVE;
+  lsGroup.remove(node.arrowHelper,node.sphereViz);
+  node.arrowHelper.line.geometry.dispose(); node.arrowHelper.cone.geometry.dispose();
+  node.sphereViz.geometry.dispose(); node.sphereViz.material.dispose();
+  node.arrowHelper=lsMakeArrow(node.pos,node.dir,node.radius,col); lsGroup.add(node.arrowHelper);
+  node.sphereViz=lsMakeSphere(node.pos,node.radius,col);           lsGroup.add(node.sphereViz);
+
+  lsSyncNodeList(); lsPreviewUpdate();
+}
+
+function lsApplyCode(){
+  const idx=S.lsActiveNodeIdx;
+  if(idx<0||idx>=S.lsNodes.length||!UI) return;
+  const node=S.lsNodes[idx];
+  node.code=UI.lsCode;
+  node.fn=compileLSFn(UI.lsCode);
+  if(!node.fn && UI) status('Formula error — check the JS syntax.','err');
+  lsPreviewUpdate();
+}
+
+function lsSetPreset(code){
+  if(UI) UI.lsCode=code;
+  lsApplyCode();
+}
+
+function lsOnGizmoChange(){
+  const idx=S.lsActiveNodeIdx;
+  if(idx<0||idx>=S.lsNodes.length) return;
+  const node=S.lsNodes[idx];
+  // sync position (translate mode moves the pivot)
+  node.pos.copy(node.pivot.position);
+  node.arrowHelper.position.copy(node.pos);
+  node.sphereViz.position.copy(node.pos);
+  // sync direction (rotate mode changes the pivot quaternion)
+  const dir=new THREE.Vector3(0,0,1).applyQuaternion(node.pivot.quaternion).normalize();
+  node.dir=dir;
+  node.arrowHelper.setDirection(dir);
+  lsPreviewUpdate();
+}
+
+function lsPreviewUpdate(){
+  if(!S.baseGeo||!UI||S.uiStep!=='lsculpt') return;
+  if(S.lsPreviewGeo){ S.lsPreviewGeo.dispose(); S.lsPreviewGeo=null; }
+  if(!S.lsNodes.length){ if(S.partMesh) S.partMesh.geometry=S.baseGeo; return; }
+  const t=UI.lsPreviewT;
+  const geo=S.baseGeo.clone();
+  applyLSDeform(geo, Math.round(t*99), t);
+  S.lsPreviewGeo=geo;
+  if(S.partMesh) S.partMesh.geometry=geo;
+}
+
+function lsRevertPreview(){
+  if(S.partMesh&&S.baseGeo) S.partMesh.geometry=S.baseGeo;
+  if(S.lsPreviewGeo){ S.lsPreviewGeo.dispose(); S.lsPreviewGeo=null; }
+}
+
+function lsEnter(){
+  lsGroup.visible=true;
+  lsXform.visible=S.lsActiveNodeIdx>=0; lsXform.enabled=S.lsActiveNodeIdx>=0;
+  lsPreviewUpdate();
+}
+
+function lsExit(){
+  lsGroup.visible=false;
+  lsXform.detach(); lsXform.visible=false; lsXform.enabled=false;
+  lsRevertPreview();
+  if(S.poses.length) regen();   // rebuild the chain with updated loop sculpt params
+}
+
+function lsClearAll(){
+  for(const nd of S.lsNodes){
+    lsGroup.remove(nd.arrowHelper,nd.sphereViz,nd.pivot);
+    nd.arrowHelper.line.geometry.dispose(); nd.arrowHelper.cone.geometry.dispose();
+    nd.sphereViz.geometry.dispose(); nd.sphereViz.material.dispose();
+  }
+  S.lsNodes=[]; S.lsActiveNodeIdx=-1;
+  lsXform.detach(); lsXform.visible=false; lsXform.enabled=false;
+  if(UI){ UI.lsActiveNode=-1; UI.lsNodes=[]; }
+  lsRevertPreview();
+}
+
 function showStepView(id){
   const wasSculpt = S.uiStep==='sculpt';
   const wasHeight = S.uiStep==='height';
+  const wasLS     = S.uiStep==='lsculpt';
   S.uiStep=id;
-  const partMode = id==='s1'||id==='s2'||id==='proj'||id==='sculpt'||id==='height';
+  const partMode = id==='s1'||id==='s2'||id==='proj'||id==='sculpt'||id==='height'||id==='lsculpt';
   if(wasSculpt && id!=='sculpt') exitSculpt();
   if(wasHeight && id!=='height') exitHeight();
-  if(id==='sculpt' && !sculpt.active && S.baseGeo) enterSculpt();
-  if(id==='height' && !disp.active && S.baseGeo) enterHeight();
+  if(wasLS     && id!=='lsculpt') lsExit();
+  if(id==='sculpt'  && !sculpt.active && S.baseGeo) enterSculpt();
+  if(id==='height'  && !disp.active  && S.baseGeo) enterHeight();
+  if(id==='lsculpt' && S.baseGeo) lsEnter();
   if(S.partMesh) S.partMesh.visible = partMode && !!S.baseGeo;
   if(pinGizmo)  pinGizmo.visible  = id==='s2';
   if(holeGizmo) holeGizmo.visible = id==='s2';
   if(S.symGroup) S.symGroup.visible = partMode && S.symVisible;
-  if(S.chain) S.chain.visible = !partMode;
+  if(S.chain) S.chain.visible = !partMode && !S.lsNodes.length;
+  if(S.lsChainGroup) S.lsChainGroup.visible = !partMode && !!S.lsNodes.length;
   if(S.overrideGroup) S.overrideGroup.visible = !partMode;
   if(S.selBox) S.selBox.visible = !partMode;
   if(S.dbgPoints) S.dbgPoints.visible = partMode;
   if(S.dbgWire) S.dbgWire.visible = partMode;
   syncPartEdges();
   syncMatePreview();         // restores the ghost neighbour when returning to step 2
+  syncGizmoAttachment();     // the swap gizmo only ever shows on step 4
 }
 
 /* ---- arm helper for click-modes (the pills are driven by UI.arm) ---- */
@@ -2024,11 +2517,29 @@ function debounceRegen(){clearTimeout(regenTimer);regenTimer=setTimeout(regen,80
 
 /* free part rotation about Z — bake the DELTA so geometry stays the single source
    of truth, and carry the anchor points along so the cylinders track the part. */
+function rotatePartX(deg){
+  if(!S.baseGeo)return;
+  const delta=THREE.MathUtils.degToRad(deg-S.partX); S.partX=deg;
+  if(Math.abs(delta)<1e-12) return;
+  bakeMatrix(new THREE.Matrix4().makeRotationX(delta));
+  const c=Math.cos(delta),s=Math.sin(delta);
+  for(const a of [UI.pin,UI.hole]){const y=a.y,z=a.z||0; a.y=c*y-s*z; a.z=s*y+c*z;}
+  syncGizmos();
+}
+function rotatePartY(deg){
+  if(!S.baseGeo)return;
+  const delta=THREE.MathUtils.degToRad(deg-S.partY); S.partY=deg;
+  if(Math.abs(delta)<1e-12) return;
+  bakeMatrix(new THREE.Matrix4().makeRotationY(delta));
+  const c=Math.cos(delta),s=Math.sin(delta);
+  for(const a of [UI.pin,UI.hole]){const x=a.x,z=a.z||0; a.x=c*x+s*z; a.z=-s*x+c*z;}
+  syncGizmos();
+}
 function rotatePartZ(deg){
   if(!S.baseGeo)return;
   const delta=THREE.MathUtils.degToRad(deg-S.partZ); S.partZ=deg;
   if(Math.abs(delta)<1e-12) return;
-  bakeMatrix(new THREE.Matrix4().makeRotationZ(delta));   // also rotates sym lines
+  bakeMatrix(new THREE.Matrix4().makeRotationZ(delta));
   const c=Math.cos(delta),s=Math.sin(delta);
   for(const a of [UI.pin,UI.hole]){const x=a.x,y=a.y; a.x=c*x-s*y; a.y=s*x+c*y;}
   syncGizmos();
@@ -2048,6 +2559,19 @@ renderer.domElement.addEventListener('pointerdown',ev=>{
   if(UI.arm==='pickLink'){ selectLinkAt(ev); setArm(null); return; }   // raycasts the chain, not the part
   const hit=rayPart(ev);
   if(UI.arm==='pickFace'){ if(hit)pickFace(hit); setArm(null); return; }
+  if(UI.arm==='lsPick'){
+    if(hit){
+      const {face}=hit, posAttr=S.baseGeo.getAttribute('position');
+      const vA=new THREE.Vector3().fromBufferAttribute(posAttr,face.a);
+      const vB=new THREE.Vector3().fromBufferAttribute(posAttr,face.b);
+      const vC=new THREE.Vector3().fromBufferAttribute(posAttr,face.c);
+      const hp=hit.point;
+      const dA=vA.distanceToSquared(hp),dB=vB.distanceToSquared(hp),dC=vC.distanceToSquared(hp);
+      const snapped=dA<=dB&&dA<=dC?vA:dB<=dC?vB:vC;
+      lsAddNode(snapped, hit.face.normal.clone());
+    }
+    setArm(null); return;
+  }
   // anchor modes need a surface point projected to XY (z=0)
   let pt;
   if(hit) pt=hit.point;
@@ -2146,6 +2670,7 @@ function chainApp(){
     openId:'s1', activeId:'s1',
     steps:{ proj:{done:false,locked:false}, s1:{done:false,locked:false},
             sculpt:{done:false,locked:true}, height:{done:false,locked:true},
+            lsculpt:{done:false,locked:true},
             s2:{done:false,locked:true}, s3:{done:false,locked:true}, s4:{done:false,locked:true} },
     arm:null,
     _loading:false,
@@ -2154,7 +2679,7 @@ function chainApp(){
     /* ----- HUD chips ----- */
     chipMesh:'No mesh loaded', chipSize:'', chipCollide:'',
     /* ----- step 1 ----- */
-    unitScale:1, colorShades:2, purify:false, partZ:0,
+    unitScale:1, colorShades:2, purify:false, partX:0, partY:0, partZ:0,
     symOut:'',
     simAuto:true, simMaxVerts:2000, simPct:0,
     simEst:'', dbgOut:'Load a part to see its vertex / triangle count.',
@@ -2170,6 +2695,16 @@ function chainApp(){
     hmRadius:8, hmFlow:0.6, hmErase:false,
     hmBlack:0, hmWhite:1, hmBright:0, hmContrast:1, hmShadows:0, hmHi:0, hmInvert:false,
     hmLoaded:false,
+    /* ----- loop sculpt (optional step) ----- */
+    lsNodes:[], lsActiveNode:-1,
+    lsIntensity:5, lsRadius:20,
+    lsMode:'push', lsFalloff:'smooth',
+    lsCode:'return n_it_nor;',
+    lsPreviewT:0.5,
+    lsGizmoMode:'rotate',
+    /* ----- mirror half ----- */
+    mirrorEnabled:false, mirrorAxis:'x', mirrorOffset:0,
+    mirrorDetectOut:'',
     /* ----- edit history (undo/redo) ----- */
     canUndo:false, canRedo:false,
     /* ----- step 2 ----- */
@@ -2184,6 +2719,7 @@ function chainApp(){
     /* ----- step 4 ----- */
     swapSel:'No link selected — click “Select link in viewport”, then a link.',
     swapFileBtnDisabled:true, swapClearDisabled:true, swapClearAllDisabled:true,
+    gizmoActive:false, gizmoMode:'translate',
     exportOut:'', exportLabel:'⬇ Download STL',
     /* ----- render toggles ----- */
     xray:false, section:false, sectionZ:100, sectionZval:'',
@@ -2193,6 +2729,7 @@ function chainApp(){
     /* ---- lifecycle ---- */
     init(){
       UI = this;
+      window.__debug.S=S; window.__debug.UI=UI;   // TEMP: removed before commit
       this.hasServer = hasServer;
       // seed the editor default functions from the current slider values
       S.scaleCode=DEFAULT_SCALE_CODE; S.scaleFn=compileScaleFn(DEFAULT_SCALE_CODE).fn;
@@ -2208,6 +2745,8 @@ function chainApp(){
       this.$watch('hole.x', ()=>onAnchorChange());
       this.$watch('hole.y', ()=>onAnchorChange());
       this.$watch('hole.z', ()=>onAnchorChange());
+      this.$watch('partX', v=>{ if(!this._loading) rotatePartX(v); });
+      this.$watch('partY', v=>{ if(!this._loading) rotatePartY(v); });
       this.$watch('partZ', v=>{ if(!this._loading) rotatePartZ(v); });
       this.$watch('count', ()=>{ if(!this._loading) debounceRegen(); });
       this.$watch('shape', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
@@ -2241,6 +2780,18 @@ function chainApp(){
       for(const k of ['hmBlack','hmWhite','hmBright','hmContrast','hmShadows','hmHi','hmInvert'])
         this.$watch(k, hmReproc);
 
+      // mirror half
+      this.$watch('mirrorEnabled', ()=>{ updateMirroredBase(); if(S.poses.length) regen(); });
+      this.$watch('mirrorAxis',    ()=>{ if(UI.mirrorEnabled){ updateMirroredBase(); if(S.poses.length) regen(); } });
+      this.$watch('mirrorOffset',  ()=>{ if(UI.mirrorEnabled) debounceMirrorRegen(); });
+
+      // loop sculpt bridges
+      this.$watch('lsIntensity', ()=>lsUpdateActiveNode());
+      this.$watch('lsRadius',    ()=>lsUpdateActiveNode());
+      this.$watch('lsMode',      ()=>lsUpdateActiveNode());
+      this.$watch('lsFalloff',   ()=>lsUpdateActiveNode());
+      this.$watch('lsPreviewT',  ()=>lsPreviewUpdate());
+
       syncSimMode();          // controls start in the (default) automatic mode
       refreshProjects();
       status('Drop a part or use “Choose file…”.');
@@ -2263,7 +2814,7 @@ function chainApp(){
       if(this.pin.x===0&&this.pin.y===0&&this.hole.x===0&&this.hole.y===0){
         this.pin={x:b.max.x*0.7,y:0}; this.hole={x:b.min.x*0.7,y:0};   // seed near the two ends
       }
-      markDone('s1'); unlock('sculpt'); unlock('height'); unlock('s2'); openStep('s2');
+      markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('s2'); openStep('s2');
       buildGizmos(); setAnchorRanges();
       if(S.partMesh)S.partMesh.visible=true;
       if(S.symGroup)S.symGroup.visible=S.symVisible;     // keep mirror lines visible as anchor guides
@@ -2284,14 +2835,31 @@ function chainApp(){
     /* ---- step 1 actions ---- */
     chooseFile(){ $('fileInput').click(); },
     onFileInput(e){ if(e.target.files[0])loadFile(e.target.files[0]); },
-    autoAlign, nudge, setArm, layFlat, detectSymmetry,
-    alignZ(){ alignInPlane(); S.partZ=0; this.partZ=0; frameCamera(); status('Auto-rotated: longest axis on X.','ok'); },
+    autoAlign, nudge, setArm, layFlat, detectSymmetry, centerPart,
+    alignZ(){ alignInPlane(); S.partX=0; this.partX=0; S.partY=0; this.partY=0; S.partZ=0; this.partZ=0; frameCamera(); status('Auto-rotated: longest axis on X.','ok'); },
+    resetRotXY(){ rotatePartX(0); this.partX=0; rotatePartY(0); this.partY=0; },
     toggleSym(){ S.symVisible=!S.symVisible; if(S.symGroup)S.symGroup.visible=S.symVisible; },
     toggleVerts(){ this.showVerts=!this.showVerts; updateDebugViz(); },
     toggleWire(){ this.showWire=!this.showWire; updateDebugViz(); },
     applySimplify, restoreDetail,
     cutFlatBottom, undoCutFlat,
     toggleCutPreview(){ this.cutPreview=!this.cutPreview; if(this.cutPreview)updateCutPreview(); else clearCutPreview(); },
+
+    /* ---- loop sculpt actions ---- */
+    mirrorSnap(){
+      if(!S.baseGeo) return;
+      S.baseGeo.computeBoundingBox();
+      const bb=S.baseGeo.boundingBox, ax=this.mirrorAxis;
+      const mn=bb.min[ax], mx=bb.max[ax];
+      this.mirrorOffset=+(Math.abs(mn)<=Math.abs(mx)?mn:mx).toFixed(3);
+    },
+    lsPickMode(){ setArm(this.arm==='lsPick'?null:'lsPick'); },
+    lsSetGizmoMode(m){ this.lsGizmoMode=m; lsXform.setMode(m); },
+    lsSelectNode(idx){ lsSelectNode(idx); },
+    lsDeleteNode(idx){ lsDeleteNode(idx); },
+    lsClear(){ lsClearAll(); status('Loop sculpt nodes cleared.'); },
+    lsApplyCode(){ lsApplyCode(); status('Formula applied.','ok'); },
+    lsPreset(code){ lsSetPreset(code); status('Preset applied.','ok'); },
 
     /* ---- sculpt actions ---- */
     sculptRepair,
@@ -2334,6 +2902,7 @@ function chainApp(){
     onSwapFileInput(e){ if(e.target.files[0]){ replaceSelectedLink(e.target.files[0]); e.target.value=''; } },
     swapClear(){ if(S.selectedLink!=null&&S.overrides.has(S.selectedLink)){ clearOverride(S.selectedLink); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('Link reverted to the base part.'); } },
     swapClearAll(){ for(const i of [...S.overrides.keys()]) clearOverride(i); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('All links reverted to the base part.'); },
+    gizmoSetMode, gizmoResetAdjust,
     exportChain, saveCfg,
     chooseCfg(){ $('cfgInput').click(); },
     onCfgInput(e){ if(e.target.files[0])loadCfg(e.target.files[0]); },

@@ -70,6 +70,7 @@
               <button class="ghost tiny" @click="nudge('x')">Rot X 90°</button>
               <button class="ghost tiny" @click="nudge('y')">Rot Y 90°</button>
               <button class="ghost tiny" @click="nudge('z')">Rot Z 90°</button>
+              <button class="ghost tiny" @click="centerPart()">Center part</button>
             </div>
             <p class="hint">Then click a triangle to pick the face to rest on the plate:</p>
             <div class="btnrow">
@@ -78,7 +79,15 @@
               <button class="ghost tiny" @click="alignZ()">Auto-rotate</button>
             </div>
             <div class="row col" style="margin-top:8px">
-              <div class="row" style="margin:0"><label>Part rotation Z (°)</label><input x-model.number="partZ" type="number" step="1"></div>
+              <div class="row" style="margin:0"><label>Rotation X (°)</label><input x-model.number="partX" type="number" step="1"></div>
+              <input x-model.number="partX" type="range" min="-180" max="180" step="1">
+            </div>
+            <div class="row col" style="margin-top:4px">
+              <div class="row" style="margin:0"><label>Rotation Y (°)</label><input x-model.number="partY" type="number" step="1"></div>
+              <input x-model.number="partY" type="range" min="-180" max="180" step="1">
+            </div>
+            <div class="row col" style="margin-top:4px">
+              <div class="row" style="margin:0"><label>Rotation Z (°)</label><input x-model.number="partZ" type="number" step="1"></div>
               <input x-model.number="partZ" type="range" min="-180" max="180" step="1">
             </div>
           </div>
@@ -120,6 +129,28 @@
             <h4>Inspect geometry (debug)</h4>
             <p class="hint">Toggle <b>Vertices</b> / <b>Wireframe</b> from the top-right corner — available in every step.</p>
             <p class="hint" id="dbgOut" x-html="dbgOut">Load a part to see its vertex / triangle count.</p>
+          </div>
+          <div class="grp">
+            <h4>Mirror half</h4>
+            <p class="hint" x-html="mirrorDetectOut" x-show="mirrorDetectOut"></p>
+            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="mirrorEnabled" style="width:auto"> <span>Mirror part before building chain</span></label>
+            <div x-show="mirrorEnabled" style="margin-top:8px">
+              <div class="row"><label>Cut axis</label>
+                <div class="btnrow">
+                  <button class="ghost tiny" :class="{on:mirrorAxis==='x'}" @click="mirrorAxis='x'">X</button>
+                  <button class="ghost tiny" :class="{on:mirrorAxis==='y'}" @click="mirrorAxis='y'">Y</button>
+                  <button class="ghost tiny" :class="{on:mirrorAxis==='z'}" @click="mirrorAxis='z'">Z</button>
+                </div>
+              </div>
+              <div class="row col" style="margin-top:6px">
+                <div class="row" style="margin:0"><label>Plane offset (mm)</label><input x-model.number="mirrorOffset" type="number" step="0.1"></div>
+                <input x-model.number="mirrorOffset" type="range" min="-500" max="500" step="0.1">
+              </div>
+              <div class="btnrow" style="margin-top:4px">
+                <button class="ghost tiny" @click="mirrorSnap()">Snap to bounding box</button>
+              </div>
+              <p class="hint">The chain and export will use the full symmetric part. Loop sculpt deformation is applied symmetrically to both halves. The part shown here stays as the half for easier editing.</p>
+            </div>
           </div>
           <div class="row" style="margin-top:10px"><button @click="s1Next()" :disabled="s1nextDisabled">Confirm orientation →</button></div>
         </div>
@@ -249,6 +280,94 @@
               <button class="ghost tiny" :disabled="!canRedo" @click="redo()">↷ Redo</button>
             </div>
             <p class="hint">One step per stroke. <b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b>. Resets when you switch modes or change topology.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- LOOP SCULPT (optional) -->
+      <section class="step" id="lsculpt"
+        :class="{ open: openId==='lsculpt', active: activeId==='lsculpt', done: steps.lsculpt.done, locked: steps.lsculpt.locked }">
+        <div class="head" @click="toggleStep('lsculpt')"><span class="num">↻</span> Loop sculpting (optional)</div>
+        <div class="body" x-show="openId==='lsculpt'">
+          <p class="hint">Place one or more sculpt nodes on the part. Each node defines a point on the surface, a push direction, and a falloff zone. During chain export each link is deformed by its <b>n_it_nor</b> value (0 → 1) — so early links are barely deformed while later ones show the full effect, creating a living progression across the chain.</p>
+
+          <div class="grp">
+            <h4>Nodes</h4>
+            <div class="btnrow">
+              <button class="ghost tiny" @click="lsPickMode()">Add node <span class="pill armed" x-show="arm==='lsPick'">click mesh…</span></button>
+              <button class="ghost tiny" @click="lsClear()" :disabled="!lsNodes.length">Clear all</button>
+            </div>
+            <template x-for="n in lsNodes" :key="n.idx">
+              <div class="projrow" :class="{ cur: lsActiveNode===n.idx }" @click="lsSelectNode(n.idx)" style="cursor:pointer">
+                <span class="projmeta" x-text="n.label" style="flex:1"></span>
+                <button class="ghost tiny" @click.stop="lsDeleteNode(n.idx)" style="padding:1px 6px">✕</button>
+              </div>
+            </template>
+            <p class="hint" x-show="!lsNodes.length">Click "Add node", then click a point on the part. A direction arrow appears — drag the gizmo to rotate it.</p>
+          </div>
+
+          <div class="grp" x-show="lsActiveNode >= 0">
+            <h4>Node parameters</h4>
+            <div class="row" style="margin-bottom:6px"><label>Gizmo</label>
+              <div class="btnrow">
+                <button class="ghost tiny" :class="{ on: lsGizmoMode==='translate' }" @click="lsSetGizmoMode('translate')">Move</button>
+                <button class="ghost tiny" :class="{ on: lsGizmoMode==='rotate' }"    @click="lsSetGizmoMode('rotate')">Rotate</button>
+              </div>
+            </div>
+            <div class="row col">
+              <div class="row" style="margin:0"><label>Intensity (mm)</label><input x-model.number="lsIntensity" type="number" step="0.5" min="-200" max="200"></div>
+              <input x-model.number="lsIntensity" type="range" min="-50" max="50" step="0.5">
+            </div>
+            <div class="row col">
+              <div class="row" style="margin:0"><label>Radius (mm)</label><input x-model.number="lsRadius" type="number" step="1" min="0.5"></div>
+              <input x-model.number="lsRadius" type="range" min="1" max="200" step="1">
+            </div>
+            <div class="row" style="margin-top:6px"><label>Mode</label>
+              <div class="btnrow">
+                <button class="ghost tiny" :class="{ on: lsMode==='push' }"    @click="lsMode='push'">Push</button>
+                <button class="ghost tiny" :class="{ on: lsMode==='inflate' }" @click="lsMode='inflate'">Inflate</button>
+                <button class="ghost tiny" :class="{ on: lsMode==='pinch' }"   @click="lsMode='pinch'">Pinch</button>
+              </div>
+            </div>
+            <p class="hint" x-show="lsMode==='push'">Vertices inside the zone are moved along the arrow direction.</p>
+            <p class="hint" x-show="lsMode==='inflate'">Vertices are pushed along their own normals — creates a bulge or hollow.</p>
+            <p class="hint" x-show="lsMode==='pinch'">Vertices are pulled toward the node's centre point.</p>
+            <div class="row" style="margin-top:6px"><label>Falloff</label>
+              <div class="btnrow">
+                <button class="ghost tiny" :class="{ on: lsFalloff==='smooth' }"   @click="lsFalloff='smooth'">Smooth</button>
+                <button class="ghost tiny" :class="{ on: lsFalloff==='cosine' }"   @click="lsFalloff='cosine'">Cosine</button>
+                <button class="ghost tiny" :class="{ on: lsFalloff==='gaussian' }" @click="lsFalloff='gaussian'">Gaussian</button>
+                <button class="ghost tiny" :class="{ on: lsFalloff==='linear' }"   @click="lsFalloff='linear'">Linear</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h4>Intensity formula</h4>
+            <p class="hint">Returns a multiplier applied to every node's intensity. <code>n_it_nor</code> is 0 on the first link, 1 on the last. Can return negative values to flip direction.</p>
+            <div class="btnrow" style="flex-wrap:wrap;gap:4px">
+              <button class="ghost tiny" @click="lsPreset('return n_it_nor;')">Linear</button>
+              <button class="ghost tiny" @click="lsPreset('return n_it_nor * n_it_nor;')">Ease in</button>
+              <button class="ghost tiny" @click="lsPreset('return 1 - (1-n_it_nor)*(1-n_it_nor);')">Ease out</button>
+              <button class="ghost tiny" @click="lsPreset('return Math.sin(n_it_nor * Math.PI);')">Bell</button>
+              <button class="ghost tiny" @click="lsPreset('return Math.abs(Math.sin(n_it_nor * Math.PI * 2));')">Wave ×2</button>
+              <button class="ghost tiny" @click="lsPreset('return Math.abs(Math.sin(n_it_nor * Math.PI * 4));')">Wave ×4</button>
+              <button class="ghost tiny" @click="lsPreset('return Math.sin(n_it_nor * Math.PI * 2);')">Alt ×2</button>
+              <button class="ghost tiny" @click="lsPreset('return Math.sin(n_it_nor * Math.PI * 4);')">Alt ×4</button>
+            </div>
+            <textarea x-model="lsCode" rows="3" style="width:100%;margin-top:6px;font-family:monospace;font-size:11px;background:#0e1116;color:#cdd6f4;border:1px solid #2a3340;border-radius:4px;padding:6px;box-sizing:border-box;resize:vertical"></textarea>
+            <div class="btnrow" style="margin-top:4px">
+              <button class="ghost tiny" @click="lsApplyCode()">Apply formula</button>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h4>Preview</h4>
+            <p class="hint">Audition what a single link looks like at any point along the chain. This is visual only — does not affect the base mesh or the chain layout.</p>
+            <div class="row col">
+              <div class="row" style="margin:0"><label>Preview n_it_nor</label><input x-model.number="lsPreviewT" type="number" step="0.05" min="0" max="1"></div>
+              <input x-model.number="lsPreviewT" type="range" min="0" max="1" step="0.01">
+            </div>
           </div>
         </div>
       </section>
@@ -383,6 +502,16 @@
               <button class="ghost tiny" @click="swapClearAll()" :disabled="swapClearAllDisabled">Revert all</button>
             </div>
             <input id="swapFileInput" type="file" accept=".stl,.ply,.obj,.glb,.gltf" hidden @change="onSwapFileInput($event)">
+            <template x-if="gizmoActive">
+              <div>
+                <p class="hint">Drag the gizmo to nudge this swapped part within its own slot — its pin/hole won't move on its own, so it's there to fix a model that doesn't quite line up.</p>
+                <div class="btnrow">
+                  <button class="ghost tiny" :class="{ on: gizmoMode==='translate' }" @click="gizmoSetMode('translate')">Move</button>
+                  <button class="ghost tiny" :class="{ on: gizmoMode==='rotate' }" @click="gizmoSetMode('rotate')">Rotate</button>
+                  <button class="ghost tiny" @click="gizmoResetAdjust()">Reset nudge</button>
+                </div>
+              </div>
+            </template>
           </div>
           <div class="btnrow">
             <button @click="exportChain()" x-text="exportLabel">⬇ Download STL</button>

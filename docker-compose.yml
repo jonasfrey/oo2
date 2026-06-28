@@ -1,0 +1,29 @@
+# Isolated Claude Code environment.
+# The container name / image / project are made unique per workspace FOLDER by
+# enter-claude.sh, so different clones never collide. Falls back to generic
+# names for a plain `docker compose up`.
+services:
+  workspace:
+    build:
+      context: .
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    image: ${COMPOSE_IMAGE:-claude-workspace:dev}
+    container_name: ${CONTAINER_NAME:-claude-workspace}
+    stdin_open: true
+    tty: true
+    volumes:
+      - .:/workspace:cached       # real-time bidirectional sync with the host
+    environment:
+      - TERM=${TERM:-xterm-256color}
+      - HOME=/home/developer
+    # For GPU access, uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    restart: unless-stopped
