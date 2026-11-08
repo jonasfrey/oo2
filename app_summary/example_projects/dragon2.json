@@ -1,0 +1,36 @@
+{
+ "name": "dragon2",
+ "id": "7a0f4ef3-cdf5-41b2-bcfd-d870c669bba7",
+ "updatedAt": "2026-06-21T10:31:48.074Z",
+ "config": {
+  "version": 4,
+  "pin": {
+   "x": -2.4,
+   "y": 0,
+   "z": 0
+  },
+  "hole": {
+   "x": 5.6,
+   "y": 0,
+   "z": 0
+  },
+  "partZ": 0,
+  "params": {
+   "count": 40,
+   "startR": 30,
+   "spacing": 24.5,
+   "plate": 220
+  },
+  "scaleCode": "// n_it     \u2013 index of this part (0 \u2026 count-1)\n// n_it_nor \u2013 that index normalized to 0 \u2026 1\n// Return either a single number (uniform scale) or {x, y, z} to scale each axis\n// independently (1 = original size on that axis; any axis you omit defaults to 1).\nconst TAU = Math.PI * 2;\nconst n = 1 +n_it_nor;\nreturn { x: n, y: n, z: n };",
+  "pathCode": "// Chain centre-line.  t grows continuously along the chain (its scale depends on\n// the curve, NOT 1-per-link \u2014 don't use it to count links). n_it is the index (0\u2026count-1)\n// of the link currently being placed; n_it_nor is that index normalized to 0\u20261.\n// Use n_it / n_it_nor for anything that should step per link.\n// z_stack is the height (mm) ALREADY added by the pin/hole z slider's stair-stepping, before\n// this link \u2014 it's informational, the engine applies it on top of your z automatically. Read\n// it if your own z formula needs to react to the current stair height; don't return it as-is\n// (z_stack + z_stack would double it) \u2014 it's already added even if you just \"return z: 0\".\n// Return the joint {x, y, z} in mm. The Start-radius / Loop-spacing sliders rewrite a, b below.\n// z is optional (defaults to 0 = flat on the plate). It only ever LIFTS each link \u2014 rotation is\n// always computed in the x/y plane only, so z (from here, or from the pin/hole slider) never\n// tilts a link, just stacks it higher/lower. Set it for a 3D path:\n//   straight line:     return { x: t, y: 0 };\n//   stair, per link:   return { x: r*Math.cos(t), y: r*Math.sin(t), z: n_it * 3 };\n//   ramp, along curve: return { x: r*Math.cos(t), y: r*Math.sin(t), z: t * 3 };\nconst a = 30;          // start radius (mm)\nconst b = 3.899;          // loop spacing / 2\u03c0\nconst r = a + b * t;        // Archimedean spiral r = a + b\u03b8\nreturn { x: r * Math.cos(t), y: r * Math.sin(t), z: 0 };",
+  "symPlanes": [],
+  "meshId": "c59f2145-5a73-4437-bb67-8cb8decc3e74.glb",
+  "overrides": [
+   {
+    "index": 39,
+    "name": "headdragonn.obj",
+    "meshId": "d43fd3e3-e2a2-4ae3-93ef-6980c64c2553.glb"
+   }
+  ]
+ }
+}

@@ -1,0 +1,31 @@
+{
+ "name": "croc",
+ "id": "65e30886-f303-4973-b8b4-b72b2702b7fc",
+ "updatedAt": "2026-06-27T12:42:58.534Z",
+ "config": {
+  "version": 4,
+  "pin": {
+   "x": 4.92,
+   "y": 0,
+   "z": 0
+  },
+  "hole": {
+   "x": -3.390949773788452,
+   "y": 0,
+   "z": 0
+  },
+  "partZ": 0,
+  "params": {
+   "shape": "straight",
+   "count": 14,
+   "startR": 25,
+   "spacing": 16,
+   "plate": 220
+  },
+  "scaleCode": "// n_it     \u2013 index of this part (0 \u2026 count-1)\n// n_it_nor \u2013 that index normalized to 0 \u2026 1\n// Return either a single number (uniform scale) or {x, y, z} to scale each axis\n// independently (1 = original size on that axis; any axis you omit defaults to 1).\nconst TAU = Math.PI * 2;\n\nlet n_freq = 6; \nlet nitn = (n_it_nor*n_freq)%1;\nlet namp = .3;\nlet noff = 1;\nlet ny_linear = (-Math.abs(nitn-0.5)+0.5)*namp + noff;\n\n\nlet ny_sine = (Math.sin(nitn*TAU)*.5+0.5)*namp;\nlet n = 1-n_it_nor*0.45;\nreturn { x: n, y: n, z: n };",
+  "colorCode": "// n_it     \u2013 index of this part (0 \u2026 count-1)\n// n_it_nor \u2013 that index normalized to 0 \u2026 1\n// base     \u2013 this part's natural colour as {r, g, b}, each 0 \u2026 1\n// Return one of:\n//   'invert'  \u2013 swap this part's colours (e.g. white<->green on a 2-colour model)\n//   a colour  \u2013 tint this part: hex (0xff0000), CSS ('#ff0000' / 'tomato'),\n//               or {r, g, b} 0\u20261. The tint MULTIPLIES a coloured model's own\n//               colours; on a plain, un-coloured part it sets the colour outright.\n//   base      \u2013 leave this part untouched\n\n// Swap the colours on every 2nd part:\nif (n_it % 2 === 1) return 'invert';\nreturn base;",
+  "pathCode": "// Chain centre-line.  t grows continuously along the chain (its scale depends on\n// the curve, NOT 1-per-link \u2014 don't use it to count links). n_it is the index (0\u2026count-1)\n// of the link currently being placed; n_it_nor is that index normalized to 0\u20261.\n// Use n_it / n_it_nor for anything that should step per link.\n// z_stack is the height (mm) ALREADY added by the pin/hole z slider's stair-stepping, before\n// this link \u2014 it's informational, the engine applies it on top of your z automatically. Read\n// it if your own z formula needs to react to the current stair height; don't return it as-is\n// (z_stack + z_stack would double it) \u2014 it's already added even if you just \"return z: 0\".\n// Return the joint {x, y, z} in mm. z is optional (defaults to 0 = flat on the plate). It only\n// ever LIFTS each link \u2014 rotation is always computed in the x/y plane only, so z (from here, or\n// from the pin/hole slider) never tilts a link, just stacks it higher/lower.\n// Straight chain along +X. The link pitch comes from the pin/hole spacing, not from t.\nreturn { x: t, y: 0, z: 0 };",
+  "symPlanes": [],
+  "meshId": "c5a82aa9-4832-49d6-b181-8d23840dbbd2.glb"
+ }
+}
