@@ -412,6 +412,96 @@
         </div>
       </section>
 
+      <!-- DECORATE (optional) -->
+      <section class="step" id="deco"
+        :class="{ open: openId==='deco', active: activeId==='deco', done: steps.deco.done, locked: steps.deco.locked }">
+        <div class="head" @click="toggleStep('deco')"><span class="num">✿</span> Decorate link (optional)</div>
+        <div class="body" x-show="openId==='deco'">
+          <p class="hint">Sit a fun object on every link — a duck, a chilli, … Load it, place it with the gizmo, and it's <b>fused into the link</b> as one coloured solid, so the whole chain comes out multi-colour. Textured models keep their colours: pick the <b>.obj together with its .mtl and texture image(s)</b> (or a .glb), or drop them all on the viewport while this step is open.</p>
+
+          <div class="grp">
+            <h4>Object</h4>
+            <div class="btnrow">
+              <button class="ghost" @click="decoChooseFiles()" :disabled="decoBusy" x-text="decoLoaded?'Replace object…':'Load object…'">Load object…</button>
+              <button class="ghost tiny" @click="decoRemove()" x-show="decoLoaded">Remove</button>
+            </div>
+            <input id="decoFileInput" type="file" multiple accept=".obj,.mtl,.glb,.gltf,.bin,.ply,.stl,.png,.jpg,.jpeg,.webp" hidden @change="decoOnFileInput($event)">
+            <p class="hint" x-html="decoInfo"></p>
+            <div x-show="decoLoaded">
+              <div class="row col" x-show="decoColorSource!=='none'">
+                <div class="row" style="margin:0"><label>Object colours</label><span class="rnglbl" style="width:auto" x-text="decoShades"></span></div>
+                <input x-model.number="decoShades" type="range" min="1" max="7" step="1" :disabled="decoFused">
+                <p class="hint" style="margin:2px 0 0">Collapses the object's colours to this many — one per filament (a chilli: red + green = 2).</p>
+              </div>
+              <div class="row" x-show="decoColorSource==='none'"><label>Object colour</label><input type="color" x-model="decoFlatColor" :disabled="decoFused"></div>
+              <div class="row" x-show="!linkHasColor"><label>Link colour</label><input type="color" x-model="decoLinkColor" :disabled="decoFused"></div>
+              <div class="row col">
+                <div class="row" style="margin:0"><label>Object detail (verts)</label><input x-model.number="decoMaxVerts" type="number" min="200" max="60000" step="500" :disabled="decoFused"></div>
+                <input x-model.number="decoMaxVerts" type="range" min="200" max="30000" step="100" :disabled="decoFused">
+              </div>
+            </div>
+          </div>
+
+          <div class="grp" x-show="decoLoaded && !decoFused">
+            <h4>Place</h4>
+            <p class="hint"><b>Arrows</b> move · <b>rings</b> rotate · <b>cubes</b> stretch one axis · <b>outer ring</b> resizes · <b>centre ball</b> moves freely. Hold <kbd>Shift</kbd> to snap (1 mm · 15° · 0.05×). Alt+drag / right-drag still orbit &amp; pan.</p>
+            <div class="row"><label>Gizmo axes</label>
+              <div class="btnrow">
+                <button class="ghost tiny" :class="{ on: decoSpace==='local' }" @click="decoSpace='local'">Object</button>
+                <button class="ghost tiny" :class="{ on: decoSpace==='world' }" @click="decoSpace='world'">Plate</button>
+                <button class="ghost tiny" :class="{ on: decoSnap }" @click="decoSnap=!decoSnap">Snap</button>
+              </div></div>
+            <div class="btnrow">
+              <button class="ghost tiny" @click="decoDrop()">Drop onto link</button>
+              <button class="ghost tiny" @click="decoCenter()">Centre over link</button>
+              <button class="ghost tiny" @click="decoRot90('x')">Rot X 90°</button>
+              <button class="ghost tiny" @click="decoRot90('y')">Rot Y 90°</button>
+              <button class="ghost tiny" @click="decoRot90('z')">Rot Z 90°</button>
+              <button class="ghost tiny" @click="decoReset()">Reset</button>
+            </div>
+            <div class="row"><label>Sink into link on drop (mm)</label><input x-model.number="decoSink" type="number" step="0.1" min="0"></div>
+            <div class="row"><label>Position x / y / z (mm)</label>
+              <input x-model.number="decoPos.x" type="number" step="0.1"><input x-model.number="decoPos.y" type="number" step="0.1"><input x-model.number="decoPos.z" type="number" step="0.1"></div>
+            <div class="row"><label>Rotation x / y / z (°)</label>
+              <input x-model.number="decoRot.x" type="number" step="1"><input x-model.number="decoRot.y" type="number" step="1"><input x-model.number="decoRot.z" type="number" step="1"></div>
+            <div class="row"><label>Scale x / y / z (×)</label>
+              <input x-model.number="decoScale.x" type="number" step="0.01" min="0.001"><input x-model.number="decoScale.y" type="number" step="0.01" min="0.001"><input x-model.number="decoScale.z" type="number" step="0.01" min="0.001"></div>
+            <div class="row"><label>Size — longest side (mm)</label><input x-model.number="decoSize" type="number" step="0.5" min="0.1"></div>
+            <div class="btnrow">
+              <button class="ghost tiny" :disabled="!canUndo" @click="undo()">↶ Undo</button>
+              <button class="ghost tiny" :disabled="!canRedo" @click="redo()">↷ Redo</button>
+            </div>
+          </div>
+
+          <div class="grp" x-show="decoLoaded && !decoFused">
+            <h4>Check</h4>
+            <p class="hint" x-html="decoTouch"></p>
+            <div class="btnrow"><button class="ghost tiny" :class="{ on: decoMateOn }" @click="decoMateOn=!decoMateOn">◧ Show neighbouring link</button></div>
+            <p class="hint" x-html="decoMate"></p>
+          </div>
+
+          <div class="grp" x-show="decoLoaded">
+            <h4>Fuse</h4>
+            <div class="row" x-show="!decoFused"><label>Method</label>
+              <select x-model="decoFuseMode">
+                <option value="csg">Boolean union — one clean shell</option>
+                <option value="merge">Merge shells — slicer unions them</option>
+              </select></div>
+            <div class="btnrow">
+              <button class="ghost tiny" @click="decoFuse()" x-show="!decoFused">Fuse into link</button>
+              <button class="ghost tiny" @click="decoUnfuse()" x-show="decoFused" :disabled="!decoCanEdit">✎ Edit placement</button>
+            </div>
+            <p class="hint" x-html="decoFuseOut"></p>
+            <div class="btnrow" x-show="decoFused && decoNeedCap">
+              <button class="ghost tiny" @click="simMaxVerts=decoNeedCap; decoNeedCap=0">Keep this detail (cap → <span x-text="decoNeedCap.toLocaleString()"></span> verts/link)</button>
+            </div>
+            <p class="hint" x-show="decoFused">The chain now uses the decorated link. <b>Edit placement</b> brings back the plain link + movable object (sculpt / cut edits made after fusing are dropped).</p>
+            <p class="hint" x-show="!decoFused">Leaving this step fuses the object automatically.</p>
+          </div>
+          <div class="row" style="margin-top:6px" x-show="decoLoaded"><button @click="decoNext()" x-text="decoFused?'Continue →':'Fuse &amp; continue →'"></button></div>
+        </div>
+      </section>
+
       <!-- STEP 3 -->
       <section class="step" id="s3"
         :class="{ open: openId==='s3', active: activeId==='s3', done: steps.s3.done, locked: steps.s3.locked }">
@@ -513,6 +603,15 @@
               </div>
             </template>
           </div>
+          <div class="row"><label>File format</label>
+            <select x-model="exportFmt">
+              <option value="auto">Auto (source format; OBJ if coloured)</option>
+              <option value="obj">OBJ — vertex colours</option>
+              <option value="glb">GLB — vertex colours</option>
+              <option value="ply">PLY — vertex colours</option>
+              <option value="stl">STL — no colour</option>
+            </select></div>
+          <p class="hint">For multi-colour prints use <b>OBJ</b>: the colours travel as vertex colours, which slicers with coloured-OBJ import (e.g. Bambu Studio, OrcaSlicer) map to filaments.</p>
           <div class="btnrow">
             <button @click="exportChain()" x-text="exportLabel">⬇ Download STL</button>
             <button class="ghost" @click="saveCfg()">Save config (JSON)</button>

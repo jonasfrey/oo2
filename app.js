@@ -19,6 +19,9 @@ import { DisplacementController } from './heightmap/DisplacementController.js';
 import { HeightmapEditor }        from './heightmap/HeightmapEditor.js';
 import { EditHistory }            from './EditHistory.js';
 import { ViewCube }               from './ViewCube.js';
+import { importDecoration, simplifyColored, weldWithColors } from './deco/DecoImport.js';
+import { fuseGeometries }         from './deco/Fuse.js';
+import { TransformGizmo }         from './deco/TransformGizmo.js';
 
 // three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
 THREE.BufferGeometry.prototype.computeBoundsTree   = computeBoundsTree;
@@ -121,6 +124,9 @@ lsXform.addEventListener('dragging-changed', e => { controls.enabled = !e.value;
 lsXform.addEventListener('objectChange', lsOnGizmoChange);
 const lsGroup = new THREE.Group(); lsGroup.visible = false; scene.add(lsGroup);
 
+/* ---- decorate step: combined move/rotate/scale gizmo for the placed object ---- */
+const decoGizmo = new TransformGizmo({ scene, camera, renderer, controls });
+
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202830, 1.1));
 const dir = new THREE.DirectionalLight(0xffffff, 1.4); dir.position.set(80,-120,200); scene.add(dir);
 
@@ -146,7 +152,7 @@ function resize(){
 }
 new ResizeObserver(resize).observe(wrap); resize();
 
-(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera);viewCube&&viewCube.update();})();
+(function loop(){requestAnimationFrame(loop);controls.update();decoGizmo.update();renderer.render(scene,camera);viewCube&&viewCube.update();})();
 
 /* ================================ STATE ================================== */
 /* Engine state — Three.js object refs + non-reactive bookkeeping. UI-bound
@@ -196,6 +202,8 @@ const S = {
   lsActiveNodeIdx:-1,   // which node is selected for editing
   lsChainGroup:null,    // THREE.Group with one deformed Mesh per link (replaces S.chain visually)
   mirroredBaseGeo:null, // cached full-part geometry built from the half-part when mirror is enabled
+  deco:null,            // object fused onto the link: {name,colorSource,missing,work,geo,mesh,fused,linkPreFuse,preFuseColor,meshId,linkMeshId}
+  decoGhost:null,       // translucent neighbouring link (+ its object) shown while placing the object
 };
 
 /* ======================================================================== *
@@ -308,6 +316,7 @@ function setBaseGeometry(geo, opts={}){
   if (S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
 
   S.baseGeo = geo;
+  decoDetachFromLink();                      // a fused object belonged to the old link → back to "placed, not fused"
   history?.clear();                          // new part → drop any prior undo history
   S.baseColorsRaw = hasVColor(geo) ? geo.getAttribute('color').array.slice() : null;
   applyColorShades();                       // collapse colored imports to the slider's shade count
@@ -355,7 +364,7 @@ function contentBounds(){
   const box=new THREE.Box3();
   if(S.lsChainGroup&&S.lsChainGroup.visible){ box.setFromObject(S.lsChainGroup); }
   else if(S.chain&&S.chain.visible){ box.setFromObject(S.chain); }
-  else if(S.baseGeo){ S.baseGeo.computeBoundingBox(); box.copy(S.baseGeo.boundingBox); }
+  else if(S.baseGeo){ S.baseGeo.computeBoundingBox(); box.copy(S.baseGeo.boundingBox); const d=decoWorldBox(); if(d) box.union(d); }
   else { box.set(new THREE.Vector3(-60,-60,0),new THREE.Vector3(60,60,60)); }
   return { center:box.getCenter(new THREE.Vector3()),
            radius:(box.getSize(new THREE.Vector3()).length()/2)||60 };
@@ -398,6 +407,10 @@ function bakeMatrix(m){
   if(S.symPlanes.length){
     for(const pl of S.symPlanes){ pl.p.applyMatrix4(m); pl.n.transformDirection(m); }
     buildSymLines();
+  }
+  if(S.deco){                                   // the placed object (and the pre-fuse link) ride along
+    if(S.deco.mesh){ S.deco.mesh.applyMatrix4(m); S.deco.mesh.updateMatrix(); }
+    if(S.deco.linkPreFuse){ S.deco.linkPreFuse.applyMatrix4(m); S.deco.linkPreFuse.computeBoundingBox(); S.deco.linkMeshId=null; }
   }
 }
 
@@ -579,7 +592,7 @@ disp.onStrokeEnd=()=>{
 // Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or Ctrl+Y = redo — only while a brush mode
 // is active, and never while typing in a field or one of the Monaco editors.
 window.addEventListener('keydown', ev=>{
-  if(!(sculpt.active || disp.active)) return;
+  if(!(sculpt.active || disp.active || decoEditable())) return;
   const t=ev.target;
   if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable||t.closest?.('.monaco-editor'))) return;
   if(!(ev.ctrlKey||ev.metaKey)) return;
@@ -831,6 +844,7 @@ function buildGizmos(){
   if(holeGizmo){scene.remove(holeGizmo);holeGizmo.geometry.dispose();}
   pinGizmo =makeCylinderGizmo(CONST.PIN_COLOR);  pinGizmo.renderOrder=997;
   holeGizmo=makeCylinderGizmo(CONST.HOLE_COLOR); holeGizmo.renderOrder=997;
+  pinGizmo.visible=holeGizmo.visible=(S.uiStep==='s2');   // only step 2 shows the anchors
   scene.add(pinGizmo,holeGizmo);
   buildMatePreview();
   syncGizmos();
@@ -1330,13 +1344,9 @@ function renderChain(poses){
   paintChain(poses, null);
   scene.add(S.chain);
   buildLSChainGroup(poses);   // per-link deformed meshes (empty if no nodes)
-  // when loop sculpt is active, hide the shared instanced mesh so only the deformed group shows
-  S.chain.visible = !S.lsNodes.length;
   rebuildOverrideMeshes(poses);
-  if(S.partMesh)S.partMesh.visible=false;
-  if(pinGizmo)pinGizmo.visible=false; if(holeGizmo)holeGizmo.visible=false;
-  if(S.symGroup)S.symGroup.visible=false;     // mirror lines belong to the single part
-  syncPartEdges(); syncMatePreview();         // hide single-part overlays while the chain shows
+  syncViewVisibility();                       // chain in steps 3/4 (loop-sculpt group instead of the instanced mesh); part elsewhere
+  syncMatePreview();
   applyXray(); applySection();                // the new instanced material adopts the active modes
 }
 
@@ -1431,14 +1441,23 @@ function updatePlate(size){
 /* ======================================================================== *
  *  STEP 4 — MERGE + EXPORT  /  SAVE-LOAD CONFIG
  * ======================================================================== */
-function exportFormat(){ const f=(S.loadFormat||'stl').toLowerCase(); return ['stl','obj','ply','glb','gltf'].includes(f)?f:'stl'; }
+const EXPORT_FORMATS=['stl','obj','ply','glb','gltf'];
+function exportFormat(){
+  if(UI && EXPORT_FORMATS.includes(UI.exportFmt)) return UI.exportFmt;     // picked explicitly
+  const f=(S.loadFormat||'stl').toLowerCase();
+  if(!EXPORT_FORMATS.includes(f)) return 'stl';
+  return (f==='stl' && hasVColor(S.baseGeo)) ? 'obj' : f;               // auto: source format, but never drop colours
+}
 function updateExportLabel(){ UI.exportLabel='⬇ Download '+exportFormat().toUpperCase(); }
+// OBJ vertex colours are sRGB by convention (OBJLoader converts them to linear on import),
+// while our colour attributes are linear — convert back so slicers see the real colours.
+const linToSRGB=c=>{ c=Math.min(1,Math.max(0,c)); return c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055; };
 function writeOBJ(geo){
   const pos=geo.getAttribute('position'), col=geo.getAttribute('color'), nrm=geo.getAttribute('normal'), idx=geo.index;
   const n=pos.count, out=['# articulated chain export'];
   for(let i=0;i<n;i++){
     let l='v '+pos.getX(i).toFixed(5)+' '+pos.getY(i).toFixed(5)+' '+pos.getZ(i).toFixed(5);
-    if(col) l+=' '+col.getX(i).toFixed(5)+' '+col.getY(i).toFixed(5)+' '+col.getZ(i).toFixed(5);
+    if(col) l+=' '+linToSRGB(col.getX(i)).toFixed(5)+' '+linToSRGB(col.getY(i)).toFixed(5)+' '+linToSRGB(col.getZ(i)).toFixed(5);
     out.push(l);
   }
   if(nrm) for(let i=0;i<n;i++) out.push('vn '+nrm.getX(i).toFixed(5)+' '+nrm.getY(i).toFixed(5)+' '+nrm.getZ(i).toFixed(5));
@@ -1521,17 +1540,26 @@ function parseGLB(buf){
       g?resolve(g):reject(new Error('no mesh found in glTF'));
     }, err=>reject(err instanceof Error?err:new Error('glTF parse failed'))));
 }
+/* Upload one geometry as GLB to data/meshes/ (vertexColors material → COLOR_0 is written); returns its id. */
+async function uploadGeo(geo, filename){
+  const glb=await exportGLB(new THREE.Mesh(geo, partMaterial(geo)));
+  const res=await fetch('/api/meshes',{method:'POST',
+    headers:{'content-type':'model/gltf-binary','x-filename':filename.replace(/[^\w.-]+/g,'_')},
+    body:glb});
+  if(!res.ok) throw new Error(await res.text());
+  return (await res.json()).id;
+}
 async function ensureMeshUploaded(){
   if(!S.baseGeo) return null;
   if(S.meshId && !S.meshDirty) return S.meshId;
-  const glb=await exportGLB(new THREE.Mesh(S.baseGeo, partMaterial(S.baseGeo)));   // ArrayBuffer (vertexColors mat → COLOR_0 written)
-  const res=await fetch('/api/meshes',{method:'POST',
-    headers:{'content-type':'model/gltf-binary','x-filename':(S.meshName||'part')+'.glb'},
-    body:glb});
-  if(!res.ok) throw new Error(await res.text());
-  const j=await res.json();
-  S.meshId=j.id; S.meshDirty=false;
+  S.meshId=await uploadGeo(S.baseGeo, (S.meshName||'part')+'.glb'); S.meshDirty=false;
   return S.meshId;
+}
+/* the decoration's working mesh + the pre-fuse link, so "Edit placement" still works after a reload */
+async function ensureDecoUploaded(){
+  const d=S.deco; if(!d||!d.work) return;
+  if(!d.meshId) d.meshId=await uploadGeo(d.work, (d.name||'object')+'.glb');
+  if(d.fused && d.linkPreFuse && !d.linkMeshId) d.linkMeshId=await uploadGeo(d.linkPreFuse, (S.meshName||'part')+'-link.glb');
 }
 async function loadMeshFromServer(id){
   S.loadFormat=(id.split('.').pop()||'stl').toLowerCase();   // export back in the stored format
@@ -1549,16 +1577,13 @@ async function fetchMeshGeom(id){
 async function ensureOverridesUploaded(){
   for(const [i,o] of S.overrides){
     if(o.meshId) continue;
-    const glb=await exportGLB(new THREE.Mesh(o.geo, partMaterial(o.geo)));
-    const res=await fetch('/api/meshes',{method:'POST',
-      headers:{'content-type':'model/gltf-binary','x-filename':'link-'+i+'.glb'}, body:glb});
-    if(!res.ok) throw new Error(await res.text());
-    o.meshId=(await res.json()).id;
+    o.meshId=await uploadGeo(o.geo, 'link-'+i+'.glb');
   }
 }
-function geoFromArrays(pos,nrm,idx){
+function geoFromArrays(pos,nrm,idx,col){
   const g=new THREE.BufferGeometry();
   g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  if(Array.isArray(col)) g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
   if(Array.isArray(idx)) g.setIndex(idx);
   if(Array.isArray(nrm)) g.setAttribute('normal',new THREE.Float32BufferAttribute(nrm,3)); else g.computeVertexNormals();
   g.computeBoundingBox(); g.computeBoundingSphere();
@@ -1577,11 +1602,33 @@ function gatherConfig(opts={}){
     lsNodes:S.lsNodes.map(n=>({pos:[n.pos.x,n.pos.y,n.pos.z],dir:[n.dir.x,n.dir.y,n.dir.z],
       intensity:n.intensity,radius:n.radius,mode:n.mode,falloff:n.falloff,code:n.code})),
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
+    colorShades:UI.colorShades, purify:UI.purify,   // a coloured part is re-quantized with these on load
   };
   if(opts.inlineGeometry && S.baseGeo){
     cfg.geometry=Array.from(S.baseGeo.attributes.position.array);
     const nrm=S.baseGeo.getAttribute('normal'); if(nrm) cfg.normals=Array.from(nrm.array);
     if(S.baseGeo.index) cfg.indices=Array.from(S.baseGeo.index.array);
+    if(hasVColor(S.baseGeo)) cfg.colors=Array.from(S.baseGeo.getAttribute('color').array);
+  }
+  if(S.deco && S.deco.mesh){
+    const d=S.deco; d.mesh.updateMatrix();
+    const e={ name:d.name, colorSource:d.colorSource, matrix:d.mesh.matrix.toArray(), fused:d.fused,
+      shades:UI.decoShades, maxVerts:UI.decoMaxVerts, flatColor:UI.decoFlatColor, linkColor:UI.decoLinkColor,
+      sink:UI.decoSink, fuseMode:UI.decoFuseMode, preFuseShades:d.preFuseColor?.shades ?? null };
+    if(d.meshId) e.meshId=d.meshId;
+    if(d.linkMeshId) e.linkMeshId=d.linkMeshId;
+    if(opts.inlineGeometry){
+      e.geometry=Array.from(d.work.attributes.position.array);
+      e.colors=Array.from(d.work.attributes.color.array);
+      e.indices=Array.from(d.work.index.array);
+      if(d.linkPreFuse){
+        const L=d.linkPreFuse;
+        e.linkGeometry=Array.from(L.attributes.position.array);
+        if(L.index) e.linkIndices=Array.from(L.index.array);
+        if(hasVColor(L)) e.linkColors=Array.from(L.getAttribute('color').array);
+      }
+    }
+    cfg.deco=e;
   }
   if(S.overrides.size){
     cfg.overrides=[...S.overrides].map(([i,o])=>{
@@ -1601,6 +1648,9 @@ function gatherConfig(opts={}){
 async function applyConfig(cfg){
   UI._loading=true;
   try{
+    decoDispose();                              // the previous project's object doesn't belong to this one
+    if(Number.isFinite(cfg.colorShades)) UI.colorShades=cfg.colorShades;   // before the mesh loads → it quantizes with these
+    if(typeof cfg.purify==='boolean') UI.purify=cfg.purify;
     if(cfg.meshId){
       await loadMeshFromServer(cfg.meshId);     // also clears symmetry
       S.meshId=cfg.meshId;
@@ -1608,6 +1658,7 @@ async function applyConfig(cfg){
       const g=new THREE.BufferGeometry();
       g.setAttribute('position',new THREE.Float32BufferAttribute(cfg.geometry,3));
       if(Array.isArray(cfg.indices)) g.setIndex(cfg.indices);
+      if(Array.isArray(cfg.colors)) g.setAttribute('color',new THREE.Float32BufferAttribute(cfg.colors,3));
       const faithful=Array.isArray(cfg.normals);
       if(faithful) g.setAttribute('normal',new THREE.Float32BufferAttribute(cfg.normals,3));
       else g.computeVertexNormals();
@@ -1672,7 +1723,11 @@ async function applyConfig(cfg){
       }
       updateSwapUI();
     }
-    markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('s2'); unlock('s3'); buildGizmos();
+    if(cfg.deco){
+      try{ await decoRestore(cfg.deco); if(S.deco&&S.deco.fused) markDone('deco'); }
+      catch(err){ status('The decoration failed to load: '+err.message,'err'); }
+    }
+    markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('deco'); unlock('s2'); unlock('s3'); buildGizmos();
     setAnchorRanges();
     ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); openStep('s3'); regen();
     UI.dropHide=true;
@@ -1681,7 +1736,7 @@ async function applyConfig(cfg){
 async function saveCfg(){
   let cfg;
   if(hasServer){
-    try{ await ensureMeshUploaded(); await ensureOverridesUploaded(); }
+    try{ await ensureMeshUploaded(); await ensureOverridesUploaded(); await ensureDecoUploaded(); }
     catch(e){ status('Mesh upload failed: '+e.message,'err'); return; }
     cfg=gatherConfig();                       // references the server meshes
   }else{
@@ -1730,7 +1785,7 @@ async function saveNewProject(){
   if(!S.baseGeo)return projStatus('Load a part first.','err');
   const name=(UI.projectName||'').trim()||`spiral ${new Date().toLocaleString()}`;
   try{
-    await ensureMeshUploaded(); await ensureOverridesUploaded();
+    await ensureMeshUploaded(); await ensureOverridesUploaded(); await ensureDecoUploaded();
     const p=await apiCreate(name,gatherConfig());
     UI.projectId=p.id; UI.projectName='';
     projStatus(`Saved “${p.name}”.`); refreshProjects();
@@ -1740,7 +1795,7 @@ async function updateCurrentProject(){
   if(!hasServer)return projStatus('Server not running.','err');
   if(!UI.projectId)return projStatus('No project loaded — use “Save as new”.','err');
   try{
-    await ensureMeshUploaded(); await ensureOverridesUploaded();
+    await ensureMeshUploaded(); await ensureOverridesUploaded(); await ensureDecoUploaded();
     const name=(UI.projectName||'').trim();
     const p=await apiUpdate(UI.projectId,{name:name||undefined,config:gatherConfig()});
     projStatus(`Updated “${p.name}”.`); refreshProjects();
@@ -1820,7 +1875,11 @@ function loadFile(file){
 const drop=$('drop');
 ['dragenter','dragover'].forEach(t=>view().addEventListener(t,e=>{e.preventDefault();if(UI){UI.dropHide=false;UI.dropHot=true;}}));
 ['dragleave','drop'].forEach(t=>view().addEventListener(t,e=>{e.preventDefault();if(UI)UI.dropHot=false;if(t==='drop'||e.target===drop)maybeHide();}));
-view().addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)loadFile(f);});
+view().addEventListener('drop',e=>{
+  const fs=e.dataTransfer.files; if(!fs.length) return;
+  if(S.uiStep==='deco' && S.baseGeo) decoLoadFiles(fs);   // decorate step: the drop is the object (+ its .mtl / textures)
+  else loadFile(fs[0]);
+});
 function view(){return document.getElementById('view');}
 function maybeHide(){ if(UI&&S.baseGeo) UI.dropHide=true; }
 
@@ -1834,13 +1893,13 @@ function clipMaterials(){
   if(S.partMesh)    o.push(S.partMesh.material);
   if(S.chain)       o.push(S.chain.material);
   if(S.matePreview) o.push(S.matePreview.material);
-  return o.concat(overrideMaterials(), lsChainMaterials());
+  return o.concat(overrideMaterials(), lsChainMaterials(), decoMaterials());
 }
 function xrayMaterials(){
   const o=[];
   if(S.partMesh) o.push(S.partMesh.material);
   if(S.chain)    o.push(S.chain.material);
-  return o.concat(overrideMaterials(), lsChainMaterials());
+  return o.concat(overrideMaterials(), lsChainMaterials(), S.deco&&S.deco.mesh ? [S.deco.mesh.material] : []);
 }
 
 function updatePartEdges(){
@@ -1858,7 +1917,7 @@ function updateDebugViz(){
   if(S.dbgPoints){ scene.remove(S.dbgPoints); S.dbgPoints.material.dispose(); S.dbgPoints=null; }   // geometry is the shared baseGeo — don't dispose
   if(S.dbgWire){ scene.remove(S.dbgWire); S.dbgWire.geometry.dispose(); S.dbgWire.material.dispose(); S.dbgWire=null; }
   if(S.baseGeo){
-    const partMode = S.uiStep==='s1'||S.uiStep==='s2'||S.uiStep==='proj'||S.uiStep==='sculpt'||S.uiStep==='height'||S.uiStep==='lsculpt';
+    const partMode = PART_STEPS.has(S.uiStep);
     const r=(S.baseGeo.boundingSphere&&S.baseGeo.boundingSphere.radius)||40;
     if(UI.showVerts){
       S.dbgPoints=new THREE.Points(S.baseGeo,new THREE.PointsMaterial({color:0x7ee787,size:Math.max(0.3,r*0.012),sizeAttenuation:true,depthTest:false}));
@@ -1887,7 +1946,7 @@ function applyXray(){
 
 const _clipPlanes=[ new THREE.Plane(new THREE.Vector3(0,0,-1),0) ];   // keeps z ≤ constant
 function contentZRange(){
-  if(S.baseGeo){ S.baseGeo.computeBoundingBox(); const b=S.baseGeo.boundingBox; return {min:b.min.z,max:b.max.z}; }
+  if(S.baseGeo){ S.baseGeo.computeBoundingBox(); const b=S.baseGeo.boundingBox.clone(), d=decoWorldBox(); if(d) b.union(d); return {min:b.min.z,max:b.max.z}; }
   return {min:0,max:10};
 }
 function updateSectionPlane(){
@@ -1959,12 +2018,20 @@ function updateSimEstimate(){
     ? `${fullV.toLocaleString()} → <b>${tgtV.toLocaleString()}</b> verts/link · whole chain ≈ <b>${fmtBytes(estStlBytes(tgtTotal))}</b> (${links} links${note})`
     : `${fullV.toLocaleString()} verts/link · whole chain ≈ ${fmtBytes(estStlBytes(fullTotal))} (${links} links${note})`;
 }
-function swapBaseGeometry(geo){
-  geo = weldByPosition(geo);
+function swapBaseGeometry(geo, {weld=true}={}){
+  if(weld) geo = weldByPosition(geo);
   geo.computeBoundingBox(); geo.computeBoundingSphere();
   const old=S.baseGeo;
   S.baseGeo=geo;
-  if(S.partMesh)    S.partMesh.geometry=geo;
+  // the colour-shades slider re-quantizes from baseColorsRaw — it has to match the NEW vertex set
+  S.baseColorsRaw = hasVColor(geo) ? geo.getAttribute('color').array.slice() : null;
+  if(S.partMesh){
+    S.partMesh.geometry=geo;
+    const m=S.partMesh.material, vc=hasVColor(geo);
+    if(m.vertexColors!==vc){                                // colours appeared (fuse) or went away (unfuse)
+      m.vertexColors=vc; m.color.set(vc?0xffffff:CONST.PART_COLOR); m.needsUpdate=true;
+    }
+  }
   if(S.matePreview) S.matePreview.geometry=geo;
   if(old){ old.disposeBoundsTree?.(); old.dispose(); }     // chain is rebuilt by regen() right after
   history?.clear();                                        // topology changed → old snapshots are invalid
@@ -2483,18 +2550,468 @@ function lsClearAll(){
   lsRevertPreview();
 }
 
+/* ======================================================================== *
+ *  DECORATE (optional step) — load an object (a duck, a chilli, …), place it
+ *  on the link with the combined gizmo, and fuse it into the link as ONE
+ *  coloured solid. Fusing replaces S.baseGeo, so pin/hole, chain, collision
+ *  and export all simply see a (coloured) part. The plain link and the object
+ *  + its placement are kept, so "Edit placement" can take the fuse back.
+ *  See deco/*.js for import (texture → vertex colours), fuse (CSG) and gizmo.
+ * ======================================================================== */
+const DECO_WORK_VERTS = 60000;     // working copy every detail level is decimated from (keeps the slider fast)
+const DECO_GHOST_COLOR = 0xffb454;
+const DECO_COLOR_CODE =
+`// n_it     – index of this part (0 … count-1)
+// n_it_nor – that index normalized to 0 … 1
+// base     – this part's natural colour as {r, g, b}, each 0 … 1
+// Return 'invert', a colour (tint) or base — see the hint above.
+
+// Decorated link: keep the object's own colours on every link.
+// ('invert' reflects colours through the palette mid-point — right for a
+//  2-colour part, but on a multi-colour object it makes colours it doesn't have.)
+return base;`;
+
+const decoEditable = ()=> S.uiStep==='deco' && !!(S.deco && S.deco.mesh && !S.deco.fused);
+function decoMaterials(){
+  const o=[];
+  if(S.deco&&S.deco.mesh) o.push(S.deco.mesh.material);
+  if(S.decoGhost) o.push(S.decoGhost.userData.mat);
+  return o;
+}
+/* world box of the placed (not yet fused) object, for framing / section range */
+function decoWorldBox(){
+  const d=S.deco; if(!d||!d.mesh||d.fused||!d.mesh.visible) return null;
+  d.geo.computeBoundingBox(); d.mesh.updateMatrix();
+  return d.geo.boundingBox.clone().applyMatrix4(d.mesh.matrix);
+}
+
+/* ---- gizmo → placement (+ one undo step per drag) ---- */
+let _decoBefore=null;
+decoGizmo.onDragStart=()=>{ S.deco.mesh.updateMatrix(); _decoBefore=S.deco.mesh.matrix.clone(); };
+decoGizmo.onChange=()=>decoChanged();
+decoGizmo.onDragEnd=()=>{ if(_decoBefore) decoRecord('Move object', _decoBefore); _decoBefore=null; decoChanged(true); };
+function decoRecord(label, before){
+  const d=S.deco; d.mesh.updateMatrix();
+  const after=d.mesh.matrix.clone();
+  if(before.equals(after)) return;
+  history.push(label, ()=>decoSetMatrix(before), ()=>decoSetMatrix(after));
+}
+function decoSetMatrix(m){
+  const o=S.deco&&S.deco.mesh; if(!o) return;
+  o.matrix.copy(m); o.matrix.decompose(o.position,o.quaternion,o.scale);
+  decoChanged(true);
+}
+
+/* ---- load ---- */
+function decoPrepWork(g){          // a fetched / inline mesh → indexed, Float32 rgb colours, like importDecoration's output
+  const col=asRGB(g);
+  const pos=g.getAttribute('position');
+  if(!g.index){
+    const n=pos.count, c=col?col.array:new Float32Array(n*3).fill(1);
+    return weldWithColors(pos.array instanceof Float32Array?pos.array:Float32Array.from(pos.array), c);
+  }
+  const out=new THREE.BufferGeometry();
+  out.setAttribute('position', pos.clone());
+  out.setAttribute('color', col ? (col===g.getAttribute('color')?col.clone():col) : new THREE.Float32BufferAttribute(new Float32Array(pos.count*3).fill(1),3));
+  out.setIndex(new THREE.Uint32BufferAttribute(Uint32Array.from(g.index.array),1));
+  return out;
+}
+async function decoLoadFiles(fileList){
+  const files=[...fileList]; if(!files.length) return;
+  if(!S.baseGeo){ status('Load the link part first (Step 1), then the object.','err'); return; }
+  UI.decoBusy=true; status('Loading object…'); UI.decoInfo='Loading…';
+  await new Promise(r=>setTimeout(r,30));            // let the panel repaint before the heavy parse
+  try{
+    const res=await importDecoration(files);
+    status('Preparing '+res.name+'…');
+    await new Promise(r=>setTimeout(r,10));
+    const M=await getSimplifier();
+    const work=simplifyColored(M,res.geo,DECO_WORK_VERTS);
+    res.geo.dispose();
+    if(S.deco&&S.deco.fused) decoUnfuse();           // replacing a fused object → put the plain link back first
+    decoDispose();
+    S.deco={ name:res.name, colorSource:res.colorSource, missing:res.missingTextures,
+             work, geo:null, mesh:null, fused:false, linkPreFuse:null, preFuseColor:null, meshId:null, linkMeshId:null };
+    UI.decoLoaded=true; UI.decoFused=false; UI.decoColorSource=res.colorSource;
+    UI.linkHasColor=hasVColor(S.baseGeo);
+    await decoRebuildGeo();
+    decoAutoPlace();
+    history.clear();
+    decoSyncVisibility(); decoFrame();
+    const miss=res.missingTextures.length ? ` ⚠ texture ${res.missingTextures.join(', ')} wasn't among the files — select it together with the .obj.` : '';
+    status(`Object “${res.name}” placed on the link. Drag the gizmo to adjust it.`+miss, miss?'warn':'ok');
+  }catch(e){ console.error(e); status('Object load failed: '+e.message,'err'); decoUpdateInfo(); }
+  finally{ UI.decoBusy=false; }
+}
+
+/* decimate the working copy to the detail budget, then collapse it to N colours (or one flat colour) */
+async function decoRebuildGeo(){
+  const d=S.deco; if(!d||!d.work) return;
+  const M=await getSimplifier();
+  const g=simplifyColored(M,d.work,Math.max(100,Math.round(UI.decoMaxVerts)||6000));
+  const col=g.getAttribute('color').array;
+  if(d.colorSource==='none'){ const c=new THREE.Color(UI.decoFlatColor); for(let i=0;i<col.length;i+=3){ col[i]=c.r; col[i+1]=c.g; col[i+2]=c.b; } }
+  else quantizeColors(col, Math.max(1,Math.round(UI.decoShades)||1), UI.purify);
+  g.boundsTree=new MeshBVH(g);
+  if(d.mesh){ const old=d.mesh.geometry; d.mesh.geometry=g; if(old&&old!==g){ old.disposeBoundsTree?.(); old.dispose(); } }
+  else{
+    d.mesh=new THREE.Mesh(g,new THREE.MeshStandardMaterial({vertexColors:true,metalness:.1,roughness:.7}));
+    d.mesh.visible=false; scene.add(d.mesh);
+    applyXray(); applySection();
+  }
+  d.geo=g;
+  decoUpdateInfo(); decoChanged(true);
+}
+let _decoRebuildTimer=null;
+function debounceDecoRebuild(){
+  if(!S.deco||S.deco.fused) return;
+  clearTimeout(_decoRebuildTimer); _decoRebuildTimer=setTimeout(()=>decoRebuildGeo(),120);
+}
+function decoUpdateInfo(){
+  const d=S.deco;
+  if(!d||!d.geo){ UI.decoInfo=''; return; }
+  const src={texture:'colours from its texture',vertex:'its vertex colours',material:'its material colours',none:'no colours of its own — pick one below'}[d.colorSource]||'';
+  UI.decoInfo=`<b>${d.name}</b> · ${src} · <b>${d.geo.attributes.position.count.toLocaleString()}</b> verts`
+    + (d.missing.length?`<br><span style="color:var(--warn)">⚠ missing texture: ${d.missing.join(', ')} — select it together with the model file.</span>`:'');
+}
+
+/* ---- placement helpers ---- */
+function decoAutoPlace(){
+  const d=S.deco, m=d.mesh;
+  S.baseGeo.computeBoundingBox(); d.geo.computeBoundingBox();
+  const L=S.baseGeo.boundingBox, ls=L.getSize(new THREE.Vector3()), ds=d.geo.boundingBox.getSize(new THREE.Vector3());
+  const s=(Math.max(ls.x,ls.y)*0.9)/(Math.max(ds.x,ds.y,ds.z)||1);   // about as big as the link
+  m.quaternion.identity(); m.scale.setScalar(s);
+  m.position.set((L.min.x+L.max.x)/2,(L.min.y+L.max.y)/2, L.max.z+ds.z*s/2);
+  m.updateMatrix();
+  decoDrop(false);
+}
+/* lower the object straight down until it meets the link, then sink it in by UI.decoSink mm */
+function decoDrop(record=true){
+  const d=S.deco; if(!d||!d.mesh||d.fused) return false;
+  const m=d.mesh; m.updateMatrix();
+  const before=m.matrix.clone(), z0=m.position.z;
+  ensureBVH();
+  S.baseGeo.computeBoundingBox(); d.geo.computeBoundingBox();
+  const L=S.baseGeo.boundingBox;
+  const rs=d.geo.boundingBox.clone().applyMatrix4(new THREE.Matrix4().compose(new THREE.Vector3(),m.quaternion,m.scale));   // extent around the pivot
+  const hits=z=>{ m.position.z=z; m.updateMatrix(); return S.baseGeo.boundsTree.intersectsGeometry(d.geo,m.matrix); };
+  const hi=L.max.z-rs.min.z+0.5, lo=L.min.z-rs.max.z, STEPS=80;
+  let contact=null;
+  for(let k=1;k<=STEPS;k++){ const z=hi-(hi-lo)*k/STEPS; if(hits(z)){ contact=z; break; } }
+  if(contact==null){
+    m.position.z=z0; m.updateMatrix();
+    status('The object never meets the link straight below it — move it over the link first.','warn');
+    return false;
+  }
+  let a=contact, b=contact+(hi-lo)/STEPS;            // a overlaps, b is clear
+  for(let i=0;i<30;i++){ const mid=(a+b)/2; if(hits(mid)) a=mid; else b=mid; }
+  m.position.z=b-Math.max(0,+UI.decoSink||0);        // first touch, then sink in so the two really overlap
+  m.updateMatrix();
+  if(record) decoRecord('Drop onto link', before);
+  decoChanged(true);
+  return true;
+}
+function decoCenter(){
+  const d=S.deco; if(!d||!d.mesh||d.fused) return;
+  const m=d.mesh; m.updateMatrix(); const before=m.matrix.clone();
+  S.baseGeo.computeBoundingBox();
+  const c=S.baseGeo.boundingBox.getCenter(new THREE.Vector3());
+  m.position.x=c.x; m.position.y=c.y; m.updateMatrix();
+  decoRecord('Centre object', before); decoChanged(true);
+}
+function decoRot90(axis){
+  const d=S.deco; if(!d||!d.mesh||d.fused) return;
+  const m=d.mesh; m.updateMatrix(); const before=m.matrix.clone();
+  m.rotateOnWorldAxis(new THREE.Vector3(axis==='x'?1:0,axis==='y'?1:0,axis==='z'?1:0), Math.PI/2);
+  m.updateMatrix();
+  decoRecord('Rotate object 90°', before); decoChanged(true);
+}
+function decoReset(){
+  const d=S.deco; if(!d||!d.mesh||d.fused) return;
+  d.mesh.updateMatrix(); const before=d.mesh.matrix.clone();
+  decoAutoPlace(); decoRecord('Reset placement', before);
+}
+/* size = longest side of the object's own (unrotated) box, in mm */
+function decoSizeNow(){
+  const d=S.deco; d.geo.computeBoundingBox();
+  const s=d.geo.boundingBox.getSize(new THREE.Vector3());
+  return Math.max(s.x*d.mesh.scale.x, s.y*d.mesh.scale.y, s.z*d.mesh.scale.z);
+}
+function decoSetSize(v){
+  const d=S.deco; if(!d||!d.mesh||d.fused||UI._loading) return;
+  v=+v; const cur=decoSizeNow();
+  if(!(v>0) || !(cur>0) || Math.abs(v-cur)<0.006) return;
+  d.mesh.scale.multiplyScalar(v/cur); decoChanged();
+}
+
+/* ---- UI ↔ mesh sync (fields are rounded, so compare with a tolerance to avoid feedback) ---- */
+function decoUIFromMesh(){
+  const m=S.deco.mesh, r2=v=>Math.round(v*100)/100, r3=v=>Math.round(v*1000)/1000, deg=v=>Math.round(THREE.MathUtils.radToDeg(v)*10)/10;
+  for(const k of ['x','y','z']){
+    UI.decoPos[k]=r2(m.position[k]); UI.decoRot[k]=deg(m.rotation[k]); UI.decoScale[k]=r3(m.scale[k]);
+  }
+  UI.decoSize=r2(decoSizeNow());
+}
+function decoMeshFromUI(){
+  const d=S.deco; if(!d||!d.mesh||d.fused||UI._loading) return;
+  const m=d.mesh, near=(a,b,t)=>Math.abs(a-b)<=t;
+  let changed=false;
+  for(const k of ['x','y','z']){
+    const p=+UI.decoPos[k], r=+UI.decoRot[k], s=+UI.decoScale[k];
+    if(Number.isFinite(p) && !near(p,m.position[k],0.006)){ m.position[k]=p; changed=true; }
+    if(Number.isFinite(r) && !near(r,THREE.MathUtils.radToDeg(m.rotation[k]),0.06)){ m.rotation[k]=THREE.MathUtils.degToRad(r); changed=true; }
+    if(Number.isFinite(s) && s>0 && !near(s,m.scale[k],0.0006)){ m.scale[k]=s; changed=true; }
+  }
+  if(changed) decoChanged();
+}
+
+/* ---- live checks: does it touch the link? does it hit the neighbouring link? ---- */
+let _decoRaf=0;
+function decoChanged(now){
+  if(!S.deco||!S.deco.mesh) return;
+  if(now){ cancelAnimationFrame(_decoRaf); _decoRaf=0; decoRefresh(); return; }
+  if(!_decoRaf) _decoRaf=requestAnimationFrame(()=>{ _decoRaf=0; decoRefresh(); });
+}
+function decoRefresh(){
+  const d=S.deco; if(!d||!d.mesh) return;
+  d.mesh.updateMatrix(); d.mesh.updateMatrixWorld();
+  decoUIFromMesh();
+  decoCheck();
+}
+const anchorsPlaced=()=> !(UI.pin.x===0&&UI.pin.y===0&&UI.hole.x===0&&UI.hole.y===0) && anchorsValid();
+function decoCheck(){
+  const d=S.deco;
+  if(!d||!d.mesh||d.fused||!S.baseGeo){ UI.decoTouch=''; UI.decoMate=''; decoSyncGhost(false); return; }
+  ensureBVH();
+  const M=d.mesh.matrix;
+  const touch=S.baseGeo.boundsTree.intersectsGeometry(d.geo,M);
+  UI.decoTouch = touch
+    ? '<span style="color:var(--accent2)">✓ overlaps the link — they fuse into one piece.</span>'
+    : '<span style="color:var(--bad)">✗ doesn\'t touch the link — it would print as a separate loose piece. Use “Drop onto link”.</span>';
+  if(!anchorsPlaced()){
+    UI.decoMate='<span style="color:#888">Mark pin &amp; hole (step 2) to check the object against the neighbouring links.</span>';
+    decoSyncGhost(false); return;
+  }
+  // the neighbour sits hole-on-pin (T); 2nd neighbour = T² — a long object can reach past the next link
+  const Mi=M.clone().invert(), L=S.baseGeo, bL=L.boundsTree, bD=d.geo.boundsTree;
+  const hitsAt=T=>[]
+    .concat(bL.intersectsGeometry(d.geo, T.clone().multiply(M))      ? ['link ↔ object'] : [])
+    .concat(bD.intersectsGeometry(L, Mi.clone().multiply(T))         ? ['object ↔ link'] : [])
+    .concat(bD.intersectsGeometry(d.geo, Mi.clone().multiply(T).multiply(M)) ? ['object ↔ object'] : []);
+  const T1=relMate(), T2=T1.clone().multiply(T1);
+  const h1=hitsAt(T1), h2=hitsAt(T2);
+  const bad=h1.length||h2.length;
+  UI.decoMate = !bad
+    ? '<span style="color:var(--accent2)">✓ clears the neighbouring links (straight mating).</span>'
+    : `<span style="color:var(--bad)">✗ touches the ${h1.length?'next':'2nd-next'} link (${[...new Set(h1.length?h1:h2)].join(', ')}) — links would fuse. Shrink, turn or move the object.</span>`;
+  decoSyncGhost(true, !!bad);
+}
+function decoSyncGhost(show, bad){
+  const d=S.deco;
+  const want = show && UI.decoMateOn && S.uiStep==='deco' && d && d.mesh && !d.fused;
+  if(!want){ if(S.decoGhost) S.decoGhost.visible=false; return; }
+  if(!S.decoGhost){
+    const mat=new THREE.MeshStandardMaterial({color:DECO_GHOST_COLOR,metalness:.1,roughness:.75,
+      transparent:true,opacity:CONST.MATE_OPACITY,side:THREE.DoubleSide,depthWrite:false});
+    const g=new THREE.Group(); g.matrixAutoUpdate=false; g.userData.mat=mat;
+    const link=new THREE.Mesh(S.baseGeo,mat), obj=new THREE.Mesh(d.geo,mat);
+    obj.matrixAutoUpdate=false; link.renderOrder=obj.renderOrder=1;
+    g.add(link,obj); g.userData.link=link; g.userData.obj=obj;
+    S.decoGhost=g; scene.add(g);
+    applySection();
+  }
+  const g=S.decoGhost;
+  g.userData.link.geometry=S.baseGeo; g.userData.obj.geometry=d.geo;
+  g.userData.obj.matrix.copy(d.mesh.matrix);
+  g.matrix.copy(relMate()); g.updateMatrixWorld(true);
+  g.userData.mat.color.set(bad?0xff6b6b:DECO_GHOST_COLOR);
+  g.visible=true;
+}
+
+/* ---- step enter / leave ---- */
+function decoSyncVisibility(){
+  const d=S.deco, editable=decoEditable();
+  if(d&&d.mesh) d.mesh.visible=editable;
+  if(editable){ decoGizmo.enable(); decoGizmo.attach(d.mesh); }
+  else{ decoGizmo.detach(); decoGizmo.disable(); }
+  if(UI){
+    const plainLink = d&&d.fused ? d.linkPreFuse : S.baseGeo;   // the link as it is without the object
+    UI.decoLoaded=!!d; UI.decoFused=!!(d&&d.fused); UI.decoCanEdit=!!(d&&d.fused&&d.linkPreFuse);
+    UI.linkHasColor=!!(plainLink&&hasVColor(plainLink));
+  }
+  if(!editable && S.decoGhost) S.decoGhost.visible=false;
+}
+function decoEnter(){
+  history.clear();                         // fresh undo timeline for this placement session
+  decoSyncVisibility();
+  if(S.deco&&S.deco.mesh) decoChanged(true);
+}
+function decoExit(){
+  if(S.deco&&S.deco.mesh&&!S.deco.fused) decoFuse();
+  decoSyncVisibility();
+}
+function decoFrame(){
+  if(!S.baseGeo) return;
+  S.baseGeo.computeBoundingBox();
+  const box=S.baseGeo.boundingBox.clone(), d=decoWorldBox(); if(d) box.union(d);
+  const c=box.getCenter(new THREE.Vector3()), r=(box.getSize(new THREE.Vector3()).length()/2)||50;
+  controls.target.copy(c);
+  camera.position.set(c.x+r*2.2,c.y-r*2.8,c.z+r*2.4);
+  camera.updateProjectionMatrix(); controls.update();
+}
+
+/* ---- fuse / unfuse ---- */
+function setColorCode(code){ if(colorEditor) colorEditor.setValue(code); else applyColorCode(code); }
+function distinctColors(geo){          // after quantization: how many colours the object really uses
+  const c=geo.getAttribute('color').array, seen=new Set();
+  for(let i=0;i<c.length && seen.size<9;i+=3) seen.add(c[i].toFixed(4)+','+c[i+1].toFixed(4)+','+c[i+2].toFixed(4));
+  return seen.size;
+}
+function decoFuse(){
+  const d=S.deco; if(!d||!d.mesh||d.fused||!S.baseGeo) return false;
+  d.mesh.updateMatrix();
+  ensureBVH();
+  const touching=S.baseGeo.boundsTree.intersectsGeometry(d.geo,d.mesh.matrix);
+  const t0=performance.now();
+  let res;
+  try{ res=fuseGeometries(S.baseGeo, d.geo, d.mesh.matrix, {linkColor:new THREE.Color(UI.decoLinkColor), mode:UI.decoFuseMode}); }
+  catch(e){ console.error(e); status('Fuse failed: '+e.message,'err'); return false; }
+  const linkColored=hasVColor(S.baseGeo);
+  d.linkPreFuse=S.baseGeo.clone(); d.linkMeshId=null;
+  d.linkPreFuse.deleteAttribute('aSwap');    // the chain shader's per-instance attribute isn't part of the link
+  d.preFuseColor={ raw:S.baseColorsRaw?S.baseColorsRaw.slice():null, shades:UI.colorShades };
+  swapBaseGeometry(res.geo);                 // welds, refreshes edges / chips, resets baseColorsRaw
+  res.geo.dispose();
+  d.fused=true;
+  // palette = the object's colours + the link's; re-quantizing snaps the blended seam vertices onto it
+  const shades=Math.min(8, (linkColored?(d.preFuseColor.shades||2):1) + distinctColors(d.geo));
+  UI.colorShades=shades; applyColorShades();
+  S.meshDirty=true;
+  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }   // pre-simplify master belonged to the plain link
+  S.appliedPct=0; UI.simResetDisabled=true; UI.simPct=0;
+  if(S.colorCode===DEFAULT_COLOR_CODE) setColorCode(DECO_COLOR_CODE);
+  if(pinGizmo) buildGizmos();
+  setAnchorRanges(); updateExportLabel();
+  if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();
+  history.clear();
+  decoSyncVisibility();
+  markDone('deco');
+  const v=S.baseGeo.attributes.position.count;
+  UI.decoFuseOut = `✓ Fused (${res.mode==='csg'?'boolean union':'merged shells'}) in ${Math.round(performance.now()-t0)} ms — the link is now <b>${v.toLocaleString()}</b> verts in ${shades} colours.`
+    + (res.note?`<br><span style="color:var(--warn)">${res.note}</span>`:'')
+    + (touching?'':'<br><span style="color:var(--bad)">⚠ the object doesn\'t touch the link — it will print as a loose piece.</span>')
+    + (UI.simAuto && v>UI.simMaxVerts?`<br>Auto-simplify will reduce it to ≤ ${UI.simMaxVerts.toLocaleString()} verts/link when the chain is built.`:'');
+  UI.decoNeedCap = (UI.simAuto && v>UI.simMaxVerts) ? Math.ceil(v/500)*500 : 0;
+  status(`Object fused into the link (${v.toLocaleString()} verts).`, touching?'ok':'warn');
+  return true;
+}
+function decoUnfuse(){
+  const d=S.deco; if(!d||!d.fused||!d.linkPreFuse) return;
+  const link=d.linkPreFuse; d.linkPreFuse=null; d.linkMeshId=null;
+  swapBaseGeometry(link,{weld:false});        // exactly the link we fused into (keeps vertex order for its colours)
+  if(d.preFuseColor){
+    if(d.preFuseColor.raw && d.preFuseColor.raw.length===S.baseGeo.attributes.position.count*3) S.baseColorsRaw=d.preFuseColor.raw;
+    UI.colorShades=d.preFuseColor.shades; applyColorShades();
+  }
+  d.preFuseColor=null; d.fused=false;
+  S.meshDirty=true;
+  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }
+  S.appliedPct=0; UI.simResetDisabled=true; UI.simPct=0;
+  if(pinGizmo) buildGizmos();
+  setAnchorRanges(); updateExportLabel();
+  if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();
+  UI.decoFuseOut=''; UI.decoNeedCap=0;
+  history.clear();
+  decoSyncVisibility(); decoChanged(true);
+  if(S.poses.length && (S.uiStep==='s3'||S.uiStep==='s4')) regen();
+  status('Fuse undone — the object is editable again.','ok');
+}
+/* a NEW link was loaded: the fused result is gone with the old link → the object is just "placed" again */
+function decoDetachFromLink(){
+  const d=S.deco; if(!d) return;
+  if(d.linkPreFuse){ d.linkPreFuse.dispose(); d.linkPreFuse=null; }
+  d.fused=false; d.linkMeshId=null; d.preFuseColor=null;
+  if(UI){ UI.decoFused=false; UI.decoFuseOut=''; }
+  decoSyncVisibility();
+}
+function decoRemove(){
+  if(!S.deco) return;
+  if(S.deco.fused){
+    if(!S.deco.linkPreFuse){ status('This object is baked into the saved part (no plain link stored) — load the plain link in Step 1 instead.','warn'); return; }
+    decoUnfuse();
+  }
+  decoDispose();
+  status('Object removed — the link is plain again.');
+}
+function decoDispose(){
+  const d=S.deco;
+  decoGizmo.detach(); decoGizmo.disable();
+  if(S.decoGhost){ scene.remove(S.decoGhost); S.decoGhost.userData.mat.dispose(); S.decoGhost=null; }
+  if(d){
+    if(d.mesh){ scene.remove(d.mesh); d.mesh.material.dispose(); }
+    for(const g of new Set([d.geo,d.work,d.linkPreFuse])) if(g){ g.disposeBoundsTree?.(); g.dispose(); }
+  }
+  S.deco=null;
+  if(UI){ UI.decoLoaded=false; UI.decoFused=false; UI.decoCanEdit=false; UI.decoInfo=''; UI.decoTouch=''; UI.decoMate=''; UI.decoFuseOut=''; UI.decoNeedCap=0; }
+}
+/* project / config load */
+async function decoRestore(c){
+  let work=null;
+  if(c.meshId) work=await fetchMeshGeom(c.meshId);
+  else if(Array.isArray(c.geometry)) work=geoFromArrays(c.geometry,null,c.indices,c.colors);
+  if(!work) return;
+  work=decoPrepWork(work);
+  let link=null;
+  if(c.fused){
+    if(c.linkMeshId) link=await fetchMeshGeom(c.linkMeshId);
+    else if(Array.isArray(c.linkGeometry)) link=geoFromArrays(c.linkGeometry,null,c.linkIndices,c.linkColors);
+    if(link){ const col=asRGB(link); if(col) link.setAttribute('color', col); }   // GLB may hand back rgba colours
+  }
+  if(Number.isFinite(c.shades)) UI.decoShades=c.shades;
+  if(Number.isFinite(c.maxVerts)) UI.decoMaxVerts=c.maxVerts;
+  if(typeof c.flatColor==='string') UI.decoFlatColor=c.flatColor;
+  if(typeof c.linkColor==='string') UI.decoLinkColor=c.linkColor;
+  if(Number.isFinite(c.sink)) UI.decoSink=c.sink;
+  if(c.fuseMode) UI.decoFuseMode=c.fuseMode;
+  S.deco={ name:c.name||'object', colorSource:c.colorSource||'vertex', missing:[], work, geo:null, mesh:null,
+           fused:false, linkPreFuse:null, preFuseColor:null, meshId:c.meshId||null, linkMeshId:null };
+  UI.decoColorSource=S.deco.colorSource;
+  await decoRebuildGeo();
+  if(Array.isArray(c.matrix)) decoSetMatrix(new THREE.Matrix4().fromArray(c.matrix));
+  if(c.fused){
+    S.deco.fused=true;                         // S.baseGeo (the saved part) already IS the fused link
+    if(link){
+      S.deco.linkPreFuse=link; S.deco.linkMeshId=c.linkMeshId||null;
+      S.deco.preFuseColor={ raw:hasVColor(link)?link.getAttribute('color').array.slice():null, shades:c.preFuseShades ?? 2 };
+    }
+  }
+  decoSyncVisibility();
+}
+
 function showStepView(id){
   const wasSculpt = S.uiStep==='sculpt';
   const wasHeight = S.uiStep==='height';
   const wasLS     = S.uiStep==='lsculpt';
+  const wasDeco   = S.uiStep==='deco';
   S.uiStep=id;
-  const partMode = id==='s1'||id==='s2'||id==='proj'||id==='sculpt'||id==='height'||id==='lsculpt';
   if(wasSculpt && id!=='sculpt') exitSculpt();
   if(wasHeight && id!=='height') exitHeight();
   if(wasLS     && id!=='lsculpt') lsExit();
+  if(wasDeco   && id!=='deco') decoExit();      // leaving with a placed object fuses it into the link
   if(id==='sculpt'  && !sculpt.active && S.baseGeo) enterSculpt();
   if(id==='height'  && !disp.active  && S.baseGeo) enterHeight();
   if(id==='lsculpt' && S.baseGeo) lsEnter();
+  if(id==='deco'    && S.baseGeo) decoEnter();
+  syncViewVisibility();
+  syncMatePreview();         // restores the ghost neighbour when returning to step 2
+  syncGizmoAttachment();     // the swap gizmo only ever shows on step 4
+}
+const PART_STEPS=new Set(['s1','s2','proj','sculpt','height','lsculpt','deco']);
+/* single part (part steps) vs whole chain (steps 3/4) — also re-applied after every chain rebuild,
+   so a regen() triggered from a part step (simplify, cut, colour code, …) doesn't cover the part */
+function syncViewVisibility(){
+  const id=S.uiStep, partMode=PART_STEPS.has(id);
   if(S.partMesh) S.partMesh.visible = partMode && !!S.baseGeo;
   if(pinGizmo)  pinGizmo.visible  = id==='s2';
   if(holeGizmo) holeGizmo.visible = id==='s2';
@@ -2506,8 +3023,6 @@ function showStepView(id){
   if(S.dbgPoints) S.dbgPoints.visible = partMode;
   if(S.dbgWire) S.dbgWire.visible = partMode;
   syncPartEdges();
-  syncMatePreview();         // restores the ghost neighbour when returning to step 2
-  syncGizmoAttachment();     // the swap gizmo only ever shows on step 4
 }
 
 /* ---- arm helper for click-modes (the pills are driven by UI.arm) ---- */
@@ -2670,7 +3185,7 @@ function chainApp(){
     openId:'s1', activeId:'s1',
     steps:{ proj:{done:false,locked:false}, s1:{done:false,locked:false},
             sculpt:{done:false,locked:true}, height:{done:false,locked:true},
-            lsculpt:{done:false,locked:true},
+            lsculpt:{done:false,locked:true}, deco:{done:false,locked:true},
             s2:{done:false,locked:true}, s3:{done:false,locked:true}, s4:{done:false,locked:true} },
     arm:null,
     _loading:false,
@@ -2720,7 +3235,13 @@ function chainApp(){
     swapSel:'No link selected — click “Select link in viewport”, then a link.',
     swapFileBtnDisabled:true, swapClearDisabled:true, swapClearAllDisabled:true,
     gizmoActive:false, gizmoMode:'translate',
-    exportOut:'', exportLabel:'⬇ Download STL',
+    exportOut:'', exportLabel:'⬇ Download STL', exportFmt:'auto',
+    /* ----- decorate (optional step) ----- */
+    decoLoaded:false, decoFused:false, decoCanEdit:false, decoBusy:false,
+    decoInfo:'', decoTouch:'', decoMate:'', decoFuseOut:'', decoColorSource:'',
+    decoShades:2, decoMaxVerts:6000, decoFlatColor:'#ffcc33', decoLinkColor:'#e6e6e6', linkHasColor:false,
+    decoPos:{x:0,y:0,z:0}, decoRot:{x:0,y:0,z:0}, decoScale:{x:1,y:1,z:1}, decoSize:0,
+    decoSpace:'local', decoSnap:false, decoSink:1, decoMateOn:true, decoFuseMode:'csg', decoNeedCap:0,
     /* ----- render toggles ----- */
     xray:false, section:false, sectionZ:100, sectionZval:'',
     /* ----- projects ----- */
@@ -2738,7 +3259,7 @@ function chainApp(){
 
       // reactive → engine bridges
       this.$watch('colorShades', ()=>applyColorShades());
-      this.$watch('purify', ()=>applyColorShades());
+      this.$watch('purify', ()=>{ applyColorShades(); debounceDecoRebuild(); });
       this.$watch('pin.x', ()=>onAnchorChange());
       this.$watch('pin.y', ()=>onAnchorChange());
       this.$watch('pin.z', ()=>onAnchorChange());
@@ -2792,6 +3313,18 @@ function chainApp(){
       this.$watch('lsFalloff',   ()=>lsUpdateActiveNode());
       this.$watch('lsPreviewT',  ()=>lsPreviewUpdate());
 
+      // decorate bridges
+      this.$watch('decoShades',   ()=>debounceDecoRebuild());
+      this.$watch('decoMaxVerts', ()=>debounceDecoRebuild());
+      this.$watch('decoFlatColor',()=>debounceDecoRebuild());
+      for(const k of ['x','y','z']) for(const f of ['decoPos','decoRot','decoScale'])
+        this.$watch(f+'.'+k, ()=>decoMeshFromUI());
+      this.$watch('decoSize',  v=>decoSetSize(v));
+      this.$watch('decoSpace', v=>decoGizmo.setSpace(v));
+      this.$watch('decoSnap',  v=>{ decoGizmo.snap=v; });
+      this.$watch('decoMateOn',()=>decoChanged(true));
+      this.$watch('exportFmt', ()=>updateExportLabel());
+
       syncSimMode();          // controls start in the (default) automatic mode
       refreshProjects();
       status('Drop a part or use “Choose file…”.');
@@ -2805,7 +3338,7 @@ function chainApp(){
       showStepView(id);
       const toChain=(id==='s3'||id==='s4');
       if(toChain){ if(S.baseGeo && anchorsValid()) regen(); }
-      else if(S.baseGeo){ frameCamera(); }
+      else if(S.baseGeo){ id==='deco' ? decoFrame() : frameCamera(); }
     },
     async s1Next(){
       if(!S.baseGeo)return;
@@ -2814,7 +3347,7 @@ function chainApp(){
       if(this.pin.x===0&&this.pin.y===0&&this.hole.x===0&&this.hole.y===0){
         this.pin={x:b.max.x*0.7,y:0}; this.hole={x:b.min.x*0.7,y:0};   // seed near the two ends
       }
-      markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('s2'); openStep('s2');
+      markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('deco'); unlock('s2'); openStep('s2');
       buildGizmos(); setAnchorRanges();
       if(S.partMesh)S.partMesh.visible=true;
       if(S.symGroup)S.symGroup.visible=S.symVisible;     // keep mirror lines visible as anchor guides
@@ -2903,6 +3436,20 @@ function chainApp(){
     swapClear(){ if(S.selectedLink!=null&&S.overrides.has(S.selectedLink)){ clearOverride(S.selectedLink); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('Link reverted to the base part.'); } },
     swapClearAll(){ for(const i of [...S.overrides.keys()]) clearOverride(i); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('All links reverted to the base part.'); },
     gizmoSetMode, gizmoResetAdjust,
+
+    /* ---- decorate actions ---- */
+    decoChooseFiles(){ $('decoFileInput').click(); },
+    decoOnFileInput(e){ if(e.target.files.length){ decoLoadFiles(e.target.files); e.target.value=''; } },
+    decoDrop(){ decoDrop(true); },
+    decoCenter, decoRot90, decoReset, decoRemove,
+    decoFuse(){ decoFuse(); },
+    decoUnfuse(){ decoUnfuse(); },
+    async decoNext(){
+      if(S.deco&&S.deco.mesh&&!S.deco.fused&&!decoFuse()) return;
+      markDone('deco');
+      if(!this.steps.s3.locked && anchorsValid()) await this.s2Next();   // chain was already built (or project loaded) → straight back to it
+      else{ openStep('s2'); status('Now place the pin and hole on the decorated link.'); }
+    },
     exportChain, saveCfg,
     chooseCfg(){ $('cfgInput').click(); },
     onCfgInput(e){ if(e.target.files[0])loadCfg(e.target.files[0]); },
