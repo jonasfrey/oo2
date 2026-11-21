@@ -39,7 +39,6 @@ const CONST = {
   DEFAULT_PLATE_MM    : 220,    // square build plate edge
   PART_COLOR          : 0x9aa7b4,
   PIN_COLOR           : 0xff5d5d,
-  HOLE_COLOR          : 0x5db0ff,
   LINK_OK_COLOR       : new THREE.Color(0x6fcf97),
   LINK_BAD_COLOR      : new THREE.Color(0xff6b6b),
   LINK_SEED_COLOR     : new THREE.Color(0x4cc2ff),
@@ -123,6 +122,19 @@ scene.add(lsXform);
 lsXform.addEventListener('dragging-changed', e => { controls.enabled = !e.value; });
 lsXform.addEventListener('objectChange', lsOnGizmoChange);
 const lsGroup = new THREE.Group(); lsGroup.visible = false; scene.add(lsGroup);
+
+/* ---- joints step: X / Y arrows on the previewed next link — dragging them sets the link offset ---- */
+const mateXform = new TransformControls(camera, renderer.domElement);
+mateXform.visible=false; mateXform.enabled=false;
+mateXform.showZ=false;                        // the arrows only slide the link over the plate; height is a number field
+scene.add(mateXform);
+const mateHandle = new THREE.Object3D();      // what the arrows hold: the middle of the next link
+scene.add(mateHandle);
+mateXform.addEventListener('dragging-changed', e=>{
+  controls.enabled = !e.value;
+  if(!e.value) syncMateGizmo();               // drag finished → the arrows settle on the (0.1 mm-stepped) link
+});
+mateXform.addEventListener('objectChange', mateGizmoMoved);
 
 /* ---- decorate step: combined move/rotate/scale gizmo for the placed object ---- */
 const decoGizmo = new TransformGizmo({ scene, camera, renderer, controls });
@@ -375,11 +387,12 @@ function frameCamera(){
   camera.position.set(r*2.2,-r*2.8,r*2.4);
   camera.updateProjectionMatrix();
 }
-/* Joints step: fit the part AND its mated neighbour, seen from higher up — placing pin & hole is an XY job */
+/* Joints step: fit the part AND its neighbour, seen from higher up — sliding the next link is an XY job */
 function frameJoints(){
   S.baseGeo.computeBoundingBox();
   const box=S.baseGeo.boundingBox.clone();
   if(anchorsValid()) box.union(S.baseGeo.boundingBox.clone().applyMatrix4(relMate()));
+  else{ const s=box.getSize(new THREE.Vector3()); box.expandByVector(new THREE.Vector3(s.x*0.4,s.y*0.4,0)); }   // still stacked → leave room to slide it out
   const c=box.getCenter(new THREE.Vector3()), r=(box.getSize(new THREE.Vector3()).length()/2)||50;
   controls.target.copy(c);
   camera.position.set(c.x+r*0.9, c.y-r*1.7, c.z+r*2.3);
@@ -390,7 +403,10 @@ function contentBounds(){
   const box=new THREE.Box3();
   if(S.lsChainGroup&&S.lsChainGroup.visible){ box.setFromObject(S.lsChainGroup); }
   else if(S.chain&&S.chain.visible){ box.setFromObject(S.chain); }
-  else if(S.baseGeo){ S.baseGeo.computeBoundingBox(); box.copy(S.baseGeo.boundingBox); const d=decoWorldBox(); if(d) box.union(d); }
+  else if(S.baseGeo){
+    S.baseGeo.computeBoundingBox(); box.copy(S.baseGeo.boundingBox); const d=decoWorldBox(); if(d) box.union(d);
+    if(S.matePreview&&S.matePreview.visible) box.union(S.baseGeo.boundingBox.clone().applyMatrix4(relMate()));   // Joints page: the next link stays in frame
+  }
   else { box.set(new THREE.Vector3(-60,-60,0),new THREE.Vector3(60,60,60)); }
   return { center:box.getCenter(new THREE.Vector3()),
            radius:(box.getSize(new THREE.Vector3()).length()/2)||60 };
@@ -852,9 +868,35 @@ function buildSymLines(){
 }
 
 /* ======================================================================== *
- *  STEP 2 — PIN / HOLE ANCHOR FRAMES + the mating transform J
+ *  STEP 2 — LINK OFFSET + PIVOT (stored as the PIN / HOLE anchor points)
  * ======================================================================== */
-let pinGizmo,holeGizmo;
+/* A joint is stored as two points on the part: `hole` — where the link before holds this one — and
+   `pin` — where this one holds the next. The Joints page edits them as what they mean for the chain:
+     offset = pin − hole   how far the next link is shifted against this one (0 = exactly on top of it)
+     pivot  = pin          the point the two turn around in a curved chain                              */
+const linkOffset = ()=>new THREE.Vector3(UI.pin.x-UI.hole.x, UI.pin.y-UI.hole.y, (UI.pin.z||0)-(UI.hole.z||0));
+function setLinkOffset(axis,v){
+  if(!Number.isFinite(v)) return;
+  if(axis==='z'){ UI.pin.z=(UI.hole.z||0)+v; return; }      // height: the first link stays on the plate
+  const m=(UI.pin[axis]+UI.hole[axis])/2;                   // x / y: both ends share the move, so the pivot keeps its place between the links
+  UI.pin[axis]=m+v/2; UI.hole[axis]=m-v/2;
+}
+function setPivot(axis,v){                                  // moves pin and hole together — the offset is untouched
+  if(!Number.isFinite(v)) return;
+  const d=v-UI.pin[axis];
+  UI.pin[axis]+=d; UI.hole[axis]+=d;
+}
+function partCenter(){
+  if(!S.baseGeo.boundingBox) S.baseGeo.computeBoundingBox();
+  return S.baseGeo.boundingBox.getCenter(new THREE.Vector3());
+}
+/* the starting point: the next link exactly on top of this one, pivoting about the middle of the part */
+function stackLinks(){
+  const c=partCenter(), p={x:+c.x.toFixed(2), y:+c.y.toFixed(2), z:0};
+  UI.pin={...p}; UI.hole={...p};
+}
+
+let pivotGizmo;
 function makeCylinderGizmo(color){
   S.baseGeo.computeBoundingBox();
   const zsize=S.baseGeo.boundingBox.getSize(new THREE.Vector3()).z||10;
@@ -865,35 +907,32 @@ function makeCylinderGizmo(color){
   g.translate(0,0,h/2-2);               // base just under the plate, rising up
   return new THREE.Mesh(g,new THREE.MeshBasicMaterial({color,depthTest:false,transparent:true,opacity:.95}));
 }
+const pivotShown = ()=>S.uiStep==='s2' && UI.pivotOpen;      // the marker only shows while its controls are open
 function buildGizmos(){
-  if(pinGizmo){scene.remove(pinGizmo);pinGizmo.geometry.dispose();}
-  if(holeGizmo){scene.remove(holeGizmo);holeGizmo.geometry.dispose();}
-  pinGizmo =makeCylinderGizmo(CONST.PIN_COLOR);  pinGizmo.renderOrder=997;
-  holeGizmo=makeCylinderGizmo(CONST.HOLE_COLOR); holeGizmo.renderOrder=997;
-  pinGizmo.visible=holeGizmo.visible=(S.uiStep==='s2');   // only step 2 shows the anchors
-  scene.add(pinGizmo,holeGizmo);
+  if(pivotGizmo){scene.remove(pivotGizmo);pivotGizmo.geometry.dispose();}
+  pivotGizmo=makeCylinderGizmo(CONST.PIN_COLOR); pivotGizmo.renderOrder=997;
+  scene.add(pivotGizmo);
   buildMatePreview();
   syncGizmos();
 }
 function syncGizmos(){
-  if(pinGizmo) pinGizmo.position.set(UI.pin.x,UI.pin.y,UI.pin.z||0);
-  if(holeGizmo)holeGizmo.position.set(UI.hole.x,UI.hole.y,UI.hole.z||0);
+  if(pivotGizmo){ pivotGizmo.position.set(UI.pin.x,UI.pin.y,UI.pin.z||0); pivotGizmo.visible=pivotShown(); }
   syncMatePreview();
 }
-/* Bound the anchor sliders to the part's footprint (+30% margin). */
+/* Bound the sliders: the offset to a bit more than one part length either way, the pivot to the part's footprint (+30%). */
 function setAnchorRanges(){
   if(!S.baseGeo) return;
   S.baseGeo.computeBoundingBox();
-  const b=S.baseGeo.boundingBox;
-  const padX=Math.max(2,(b.max.x-b.min.x)*0.3), padY=Math.max(2,(b.max.y-b.min.y)*0.3), padZ=Math.max(2,(b.max.z-b.min.z)*0.3);
+  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3()), d=linkOffset();
+  const padX=Math.max(2,s.x*0.3), padY=Math.max(2,s.y*0.3);
   UI.anchorXmin=+(b.min.x-padX).toFixed(1); UI.anchorXmax=+(b.max.x+padX).toFixed(1);
   UI.anchorYmin=+(b.min.y-padY).toFixed(1); UI.anchorYmax=+(b.max.y+padY).toFixed(1);
-  UI.anchorZmin=+(b.min.z-padZ).toFixed(1); UI.anchorZmax=+(b.max.z+padZ).toFixed(1);
+  const span=(size,cur)=>Math.ceil(Math.max(2, size*1.3, Math.abs(cur)*1.2));   // a saved offset always fits its slider
+  UI.offXmax=span(s.x,d.x); UI.offYmax=span(s.y,d.y); UI.offZmax=span(s.z,d.z);
 }
 function anchorsValid(){
-  const dist=Math.hypot(UI.pin.x-UI.hole.x,UI.pin.y-UI.hole.y,(UI.pin.z||0)-(UI.hole.z||0));
-  if(dist<1e-3){
-    UI.anchorWarn='⚠ Pin and hole are at the same spot — links would stack. Separate them.';
+  if(linkOffset().length()<1e-3){
+    UI.anchorWarn='The next link sits exactly on top of this one — move it along X or Y first.';
     return false;
   }
   UI.anchorWarn='';
@@ -1182,7 +1221,7 @@ async function ensureColorEditor(){
 const PATH_DOC =
 `// Chain centre-line: return the point {x, y, z} in mm for a position t along the curve.
 // t grows continuously (NOT one per link) — count links with n_it (0 … count-1) or n_it_nor (0 … 1).
-// z only lifts a link, never tilts it. z_stack = height already added by the pin/hole Z offset.`;
+// z only lifts a link, never tilts it. z_stack = height already added by the link offset's Z.`;
 // shape: 'straight' (default) or 'spiral'. The Shape selector + sliders rewrite this function.
 function pathCodeFor(shape, a, b){
   const f=n=>Number.isFinite(n)?String(Math.round(n*1000)/1000):'0';
@@ -1194,7 +1233,7 @@ const b = ${f(b)};          // loop spacing / 2π
 const r = a + b * t;
 return { x: r * Math.cos(t), y: r * Math.sin(t), z: 0 };`;
   return PATH_DOC + `
-// Straight chain along +X. The link pitch comes from the pin/hole spacing, not from t.
+// Straight chain along +X. The link pitch comes from the link offset (Joints page), not from t.
 return { x: t, y: 0, z: 0 };`;
 }
 function compilePathFn(code){
@@ -2034,13 +2073,15 @@ function applySection(){
 
 function relMate(){
   // straight (no hinge) neighbour: translate so the neighbour's HOLE lands on our PIN.
-  return new THREE.Matrix4().makeTranslation(UI.pin.x-UI.hole.x, UI.pin.y-UI.hole.y, (UI.pin.z||0)-(UI.hole.z||0));
+  const d=linkOffset();
+  return new THREE.Matrix4().makeTranslation(d.x,d.y,d.z);
 }
 function buildMatePreview(){
   if(!S.baseGeo) return;
   if(S.matePreview){ scene.remove(S.matePreview); S.matePreview.material.dispose(); S.matePreview=null; }
   const mat=new THREE.MeshStandardMaterial({color:CONST.MATE_COLOR,metalness:.1,roughness:.75,
-    transparent:true,opacity:CONST.MATE_OPACITY,side:THREE.DoubleSide,depthWrite:false});
+    transparent:true,opacity:CONST.MATE_OPACITY,side:THREE.DoubleSide,depthWrite:false,
+    polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});   // stays visible while it lies exactly on the part
   S.matePreview=new THREE.Mesh(S.baseGeo,mat);
   S.matePreview.matrixAutoUpdate=false; S.matePreview.renderOrder=1;
   scene.add(S.matePreview);
@@ -2048,19 +2089,33 @@ function buildMatePreview(){
   syncMatePreview();
 }
 function syncMatePreview(){
-  if(!S.matePreview) return;
-  const show=UI.matePreviewOn && S.uiStep==='s2' && !!S.partMesh && S.partMesh.visible && anchorsValid();
+  if(!S.matePreview){ syncMateGizmo(); return; }   // a new part was just loaded → its arrows go with the old preview
+  const show=UI.matePreviewOn && S.uiStep==='s2' && !!S.partMesh && S.partMesh.visible;
   S.matePreview.visible=show;
+  syncMateGizmo();
   if(!show){ UI.mateOut=''; UI.mateState=''; return; }
-  const M=relMate();
+  const M=relMate(), stacked=!anchorsValid();
   S.matePreview.matrix.copy(M); S.matePreview.updateMatrixWorld(true);
-  ensureBVH();
-  const hit=S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,M);
+  let hit=stacked;
+  if(!hit){ ensureBVH(); hit=S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,M); }
   S.matePreview.material.color.set(hit?0xff6b6b:CONST.MATE_COLOR);
   UI.mateState = hit ? 'bad' : 'ok';
-  UI.mateOut = hit
-    ? 'The next link overlaps this one — the two would fuse when printed. Move the pin and hole further apart, or to a spot with more room.'
-    : 'The next link clears this one — they don’t touch.';
+  UI.mateOut = stacked ? 'The next link sits exactly on top of this one. Move it along X or Y until the two no longer touch.'
+    : hit ? 'The two links still touch — they would fuse when printed. Move the next link a little further.'
+    : 'The two links don’t touch — they print as separate, moving pieces.';
+}
+/* the X / Y arrows sit on the middle of the next link, wherever it is shown */
+function syncMateGizmo(){
+  const show=!!(S.matePreview && S.matePreview.visible);
+  if(show && !mateXform.dragging) mateHandle.position.copy(partCenter()).add(linkOffset());
+  if(show && mateXform.object!==mateHandle) mateXform.attach(mateHandle);
+  if(!show && mateXform.object) mateXform.detach();
+  mateXform.enabled=mateXform.visible=show;
+}
+function mateGizmoMoved(){
+  const c=partCenter(), ax=mateXform.axis||'', mm=v=>Math.round(v*10)/10;   // 0.1 mm steps, like the sliders
+  if(ax.includes('X')) setLinkOffset('x', mm(mateHandle.position.x-c.x));   // only the dragged axis — the other keeps its exact value
+  if(ax.includes('Y')) setLinkOffset('y', mm(mateHandle.position.y-c.y));
 }
 
 /* ---- SIMPLIFY ---- */
@@ -2394,6 +2449,7 @@ function openStep(id, force){
   showStepView(id);
   if(UI) UI.$nextTick(()=>{ const p=$('pages'); if(p) p.scrollTop=0; });
   if(!S.baseGeo) return;
+  if(id==='s2') UI.s2nextDisabled=!anchorsValid();   // an opened project sets the joint with the watchers muted
   const kind=viewKind(id), changed = force || kind!==viewKind(prev);
   if(kind==='chain'){
     if(anchorsValid() && (changed || !S.poses.length)){ regen(); if(changed) setView('iso'); }
@@ -2884,7 +2940,7 @@ function decoCheck(){
     ? '<span style="color:var(--accent2)">✓ overlaps the link — they fuse into one piece.</span>'
     : '<span style="color:var(--bad)">✗ doesn\'t touch the link — it would print as a separate loose piece. Use “Drop onto link”.</span>';
   if(!anchorsPlaced()){
-    UI.decoMate='<span style="color:#888">Place the pin &amp; hole (Joints step) to check the object against the neighbouring links.</span>';
+    UI.decoMate='<span style="color:#888">Move the next link into place (Joints step) to check the object against the neighbouring links.</span>';
     decoSyncGhost(false); return;
   }
   // the neighbour sits hole-on-pin (T); 2nd neighbour = T² — a long object can reach past the next link
@@ -2988,7 +3044,7 @@ function decoFuse(){
   if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }   // pre-simplify master belonged to the plain link
   S.appliedPct=0; UI.simResetDisabled=true; UI.simPct=0;
   if(S.colorCode===DEFAULT_COLOR_CODE) setColorCode(DECO_COLOR_CODE);
-  if(pinGizmo) buildGizmos();
+  if(pivotGizmo) buildGizmos();
   setAnchorRanges(); updateExportLabel();
   if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();
   history.clear();
@@ -3015,7 +3071,7 @@ function decoUnfuse(){
   S.meshDirty=true;
   if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }
   S.appliedPct=0; UI.simResetDisabled=true; UI.simPct=0;
-  if(pinGizmo) buildGizmos();
+  if(pivotGizmo) buildGizmos();
   setAnchorRanges(); updateExportLabel();
   if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();
   UI.decoFuseOut=''; UI.decoNeedCap=0;
@@ -3111,8 +3167,7 @@ const PART_STEPS=new Set(['s1','s2','proj','sculpt','height','lsculpt','deco']);
 function syncViewVisibility(){
   const id=S.uiStep, partMode=PART_STEPS.has(id);
   if(S.partMesh) S.partMesh.visible = partMode && !!S.baseGeo;
-  if(pinGizmo)  pinGizmo.visible  = id==='s2';
-  if(holeGizmo) holeGizmo.visible = id==='s2';
+  if(pivotGizmo) pivotGizmo.visible = pivotShown();
   if(S.symGroup) S.symGroup.visible = partMode && S.symVisible;
   if(S.chain) S.chain.visible = !partMode && !S.lsNodes.length;
   if(S.lsChainGroup) S.lsChainGroup.visible = !partMode && !!S.lsNodes.length;
@@ -3127,8 +3182,6 @@ function syncViewVisibility(){
         banner + crosshair cursor; Esc or pressing the same button again cancels) ---- */
 const ARM_HINTS={
   pickFace :'Click the face of the part that should rest on the plate',
-  placePin :'Click where the pin is',
-  placeHole:'Click where the hole is',
   pickLink :'Click the link you want to swap',
   lsPick   :'Click a point on the part',
 };
@@ -3197,27 +3250,15 @@ renderer.domElement.addEventListener('pointerdown',ev=>{
     }
     setArm(null); return;
   }
-  // anchor modes need a surface point projected to XY (z=0)
-  let pt;
-  if(hit) pt=hit.point;
-  else { // fall back to intersection with the Z=0 plane
-    const plane=new THREE.Plane(new THREE.Vector3(0,0,1),0); pt=new THREE.Vector3();
-    if(!raycaster.ray.intersectPlane(plane,pt))return;
-  }
-  if(UI.arm==='placePin'){ UI.pin.x=+pt.x.toFixed(2);UI.pin.y=+pt.y.toFixed(2); }
-  if(UI.arm==='placeHole'){ UI.hole.x=+pt.x.toFixed(2);UI.hole.y=+pt.y.toFixed(2); }
-  syncGizmos();
-  UI.s2nextDisabled=!anchorsValid();
-  setArm(null);
 });
 
-/* ---- drag the pin / hole cylinders directly on the plate (step 2) ---- */
-let dragAnchor=null;
+/* ---- drag the pivot marker directly on the plate (step 2, while its controls are open) ---- */
+let dragPivot=false;
 const _platePlane=new THREE.Plane(new THREE.Vector3(0,0,1),0), _plateHit=new THREE.Vector3();
 function gizmoUnder(ev){
-  if(!pinGizmo||!pinGizmo.visible) return null;
+  if(!pivotGizmo||!pivotGizmo.visible) return null;
   pointerNDC(ev);
-  return raycaster.intersectObjects([pinGizmo,holeGizmo],false)[0]||null;
+  return raycaster.intersectObject(pivotGizmo,false)[0]||null;
 }
 function plateUnder(ev){
   pointerNDC(ev);
@@ -3228,26 +3269,24 @@ function plateUnder(ev){
 }
 wrap.addEventListener('pointerdown',ev=>{
   if(!UI||UI.arm||ev.button!==0) return;
-  const hit=gizmoUnder(ev); if(!hit) return;
-  dragAnchor = hit.object===pinGizmo?'pin':'hole';
+  if(!gizmoUnder(ev)) return;
+  dragPivot=true;
   controls.enabled=false;
   renderer.domElement.style.cursor='grabbing';
   ev.stopPropagation(); ev.preventDefault();
 },true);
 window.addEventListener('pointermove',ev=>{
-  if(!dragAnchor){
-    if(UI&&!UI.arm){ const h=gizmoUnder(ev); if(pinGizmo&&pinGizmo.visible) renderer.domElement.style.cursor=h?'grab':''; }
+  if(!dragPivot){
+    if(UI&&!UI.arm){ const h=gizmoUnder(ev); if(pivotGizmo&&pivotGizmo.visible) renderer.domElement.style.cursor=h?'grab':''; }
     return;
   }
   const pt=plateUnder(ev); if(!pt) return;
-  const a = dragAnchor==='pin'?UI.pin:UI.hole;
-  a.x=+pt.x.toFixed(2); a.y=+pt.y.toFixed(2);
+  setPivot('x',+pt.x.toFixed(2)); setPivot('y',+pt.y.toFixed(2));
   syncGizmos();
-  UI.s2nextDisabled=!anchorsValid();
 });
 window.addEventListener('pointerup',()=>{
-  if(!dragAnchor) return;
-  dragAnchor=null; controls.enabled=true; renderer.domElement.style.cursor='';
+  if(!dragPivot) return;
+  dragPivot=false; controls.enabled=true; renderer.domElement.style.cursor='';
 });
 
 /* ---- side panel resize ---- */
@@ -3333,8 +3372,9 @@ function chainApp(){
     /* ----- edit history (undo/redo) ----- */
     canUndo:false, canRedo:false,
     /* ----- step 2 ----- */
-    pin:{x:0,y:0,z:0}, hole:{x:0,y:0,z:0},
-    anchorXmin:-100, anchorXmax:100, anchorYmin:-100, anchorYmax:100, anchorZmin:-20, anchorZmax:20,
+    pin:{x:0,y:0,z:0}, hole:{x:0,y:0,z:0},             // stored joint — edited through offX… / pivX… below
+    anchorXmin:-100, anchorXmax:100, anchorYmin:-100, anchorYmax:100,
+    offXmax:50, offYmax:50, offZmax:20, pivotOpen:false,
     mateOut:'', mateState:'', matePreviewOn:true, anchorWarn:'', s2nextDisabled:true,
     /* ----- step 3 ----- */
     chainLenVal:'—', chainLenSub:'',
@@ -3379,6 +3419,7 @@ function chainApp(){
       this.$watch('hole.x', ()=>onAnchorChange());
       this.$watch('hole.y', ()=>onAnchorChange());
       this.$watch('hole.z', ()=>onAnchorChange());
+      this.$watch('pivotOpen', ()=>syncGizmos());
       this.$watch('partX', v=>{ if(!this._loading) rotatePartX(v); });
       this.$watch('partY', v=>{ if(!this._loading) rotatePartY(v); });
       this.$watch('partZ', v=>{ if(!this._loading) rotatePartZ(v); });
@@ -3456,8 +3497,8 @@ function chainApp(){
     stepTitle(id){
       if(id==='s1') return 'Load and orient the link';
       if(!this.hasPart) return 'Load a part first';
-      if(id==='s2') return 'Mark the pin and the hole';
-      if(this.steps.s3.locked) return 'Place the pin and hole, then build the chain';
+      if(id==='s2') return 'Set how the next link sits';
+      if(this.steps.s3.locked) return 'Move the next link into place, then build the chain';
       return id==='s3' ? 'Shape and length of the chain' : 'Download the printable file';
     },
     /* a click in the step bar: go there if it's reachable, otherwise advance one step the way the Next buttons would */
@@ -3469,7 +3510,7 @@ function chainApp(){
       if(id==='s2'){ await this.s1Next(); return; }
       if(this.steps.s3.locked){                    // the chain hasn't been built yet
         if(this.openId==='s2') await this.s2Next();
-        else{ await this.s1Next(); status('Place the pin and hole first, then press “Build chain”.'); }
+        else{ await this.s1Next(); status('Move the next link into place first, then press “Build chain”.'); }
         return;
       }
       if(id==='s3') openStep('s3'); else this.s3Next();
@@ -3489,16 +3530,15 @@ function chainApp(){
     get mouseHint(){
       return (this.openId==='sculpt'||this.openId==='height')
         ? 'Drag: paint · Alt+drag: rotate · Right-drag: move · Scroll: zoom'
+        : this.openId==='s2'
+        ? 'Drag an arrow: move the next link · Drag: rotate · Right-drag: move · Scroll: zoom'
         : 'Drag: rotate · Right-drag: move · Scroll: zoom';
     },
     /* everything that has to be true of the part before any later page works on it (safe to repeat) */
     async preparePart(){
       if(!S.baseGeo) return false;
       if(this.simAuto) await autoFitReduction(true);   // reduce the part BEFORE any chain work
-      const b=S.baseGeo.boundingBox;
-      if(this.pin.x===0&&this.pin.y===0&&this.hole.x===0&&this.hole.y===0){
-        this.pin={x:+(b.max.x*0.7).toFixed(1),y:0,z:0}; this.hole={x:+(b.min.x*0.7).toFixed(1),y:0,z:0};   // seed near the two ends
-      }
+      if(!anchorsValid()) stackLinks();                // no offset yet → the pivot follows the part as it is now
       markDone('s1'); unlock('s2');
       buildGizmos(); setAnchorRanges();
       return true;
@@ -3506,7 +3546,7 @@ function chainApp(){
     async s1Next(){
       if(!(await this.preparePart())) return;
       openStep('s2');
-      status('Drag the red pin and the blue hole into place — or press “Place” and click the part.');
+      status('Move the next link — with the arrows in the view, or with X and Y — until the two no longer touch.');
     },
     async s2Next(){
       if(!S.baseGeo||!anchorsValid())return;
@@ -3580,6 +3620,13 @@ function chainApp(){
 
     /* ---- step 2 actions ---- */
     toggleMate(){ this.matePreviewOn=!this.matePreviewOn; syncMatePreview(); },
+    /* the joint as the page shows it: where the next link sits against this one, and the point they turn around */
+    get offX(){ return +(this.pin.x-this.hole.x).toFixed(3); },                 set offX(v){ setLinkOffset('x',v); },
+    get offY(){ return +(this.pin.y-this.hole.y).toFixed(3); },                 set offY(v){ setLinkOffset('y',v); },
+    get offZ(){ return +((this.pin.z||0)-(this.hole.z||0)).toFixed(3); },       set offZ(v){ setLinkOffset('z',v); },
+    get pivX(){ return +this.pin.x.toFixed(3); },                               set pivX(v){ setPivot('x',v); },
+    get pivY(){ return +this.pin.y.toFixed(3); },                               set pivY(v){ setPivot('y',v); },
+    resetOffset(){ if(S.baseGeo){ stackLinks(); status('The next link is back on top of this one.'); } },
 
     /* ---- step 3 actions ---- */
     recheck(){ regen(true); },
@@ -3620,7 +3667,7 @@ function chainApp(){
       if(S.deco&&S.deco.mesh&&!S.deco.fused&&!decoFuse()) return;
       markDone('deco');
       if(!this.steps.s3.locked && anchorsValid()) await this.s2Next();   // chain was already built (or project loaded) → straight back to it
-      else{ openStep('s2'); status('Now place the pin and hole on the decorated link.'); }
+      else{ openStep('s2'); status('Now move the next link into place against the decorated one.'); }
     },
     exportChain, saveCfg,
     chooseCfg(){ $('cfgInput').click(); },

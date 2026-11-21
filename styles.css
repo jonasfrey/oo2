@@ -2,7 +2,7 @@
   :root{
     --bg:#0e1116; --panel:#151a21; --panel2:#1b222c; --panel3:#243140; --line:#2b3441;
     --ink:#e6edf3; --soft:#c3cdd9; --muted:#93a0b0; --accent:#4cc2ff; --accent2:#7ee787; --ok:#7ee787;
-    --bad:#ff6b6b; --warn:#ffcc66; --pin:#ff5d5d; --hole:#5db0ff; --mate:#ffb454;
+    --bad:#ff6b6b; --warn:#ffcc66; --pin:#ff5d5d; --mate:#ffb454;
     --radius:10px;
   }
   *{box-sizing:border-box}
@@ -36,7 +36,6 @@
   code{background:#0c1117;border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px}
   .grow{flex:1}
   .swatch{display:inline-block;width:10px;height:10px;border-radius:3px;vertical-align:baseline;margin-right:5px}
-  .cpin{color:var(--pin)} .chole{color:var(--hole)}
 
   /* label · control rows */
   .row{display:flex;align-items:center;gap:8px;margin:9px 0}
