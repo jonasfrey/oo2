@@ -332,16 +332,31 @@ function setBaseGeometry(geo, opts={}){
   updateExportLabel();                      // reflect the loaded file's format on the download button
   if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();   // show the recommended reduction
   UI.s1nextDisabled=false;
+  UI.hasPart=true; UI.partName=S.meshName; UI.partHasColor=hasVColor(geo);
+  fitToolSizes();
   UI.dropHide=true;                         // load done → drop the overlay
   // run half-part detection and seed the mirror controls
   const _det=detectHalfPart();
+  UI.halfDetected=!!_det;
   if(_det){
-    UI.mirrorDetectOut=`<b style="color:var(--ok)">Flat cut face detected</b> on <b>${_det.axis.toUpperCase()}</b> axis (${(_det.pct*100).toFixed(0)}% of vertices coplanar) — this looks like a half-part. Enable <i>Mirror half</i> below.`;
+    UI.mirrorDetectOut=`<b style="color:var(--ok)">Flat cut face detected</b> on <b>${_det.axis.toUpperCase()}</b> axis (${(_det.pct*100).toFixed(0)}% of vertices coplanar) — this looks like a half-part.`;
     UI.mirrorAxis=_det.axis; UI.mirrorOffset=+_det.offset.toFixed(3);
   } else {
-    UI.mirrorDetectOut=`<span style="color:#888">No flat cut face detected — appears to be a full mesh.</span>`;
+    UI.mirrorDetectOut='';
   }
-  status('Part loaded. Auto-align, then pick the face to lay flat.','ok');
+  status('Part loaded. Lay it flat the way it will print, then continue to Joints.','ok');
+}
+
+/* A new part → brush / morph sizes that suit ITS size (a fixed 8 mm brush swallows a 15 mm link whole). */
+function fitToolSizes(){
+  const s=S.baseGeo.boundingBox.getSize(new THREE.Vector3()), big=Math.max(s.x,s.y,s.z)||10;
+  const half=v=>Math.max(0.5,Math.round(v*2)/2);          // 0.5 mm steps, like the sliders
+  UI.partSize=big;
+  UI.sculptRadius=half(big*0.12); UI.hmRadius=half(big*0.12);
+  UI.hmStrength=Math.min(4,half(big*0.05));
+  if(S.lsActiveNodeIdx<0){                                // (these two fields edit the selected morph point, if any)
+    UI.lsRadius=Math.max(1,Math.round(big*0.3)); UI.lsIntensity=half(big*0.1);
+  }
 }
 
 function updateMeshChips(){
@@ -350,6 +365,7 @@ function updateMeshChips(){
   const s=b.getSize(new THREE.Vector3());
   UI.chipMesh=`<b>${S.baseGeo.attributes.position.count.toLocaleString()}</b> verts · ${Math.round(triCount(S.baseGeo)).toLocaleString()} tris`;
   UI.chipSize=`bbox <b>${s.x.toFixed(1)}×${s.y.toFixed(1)}×${s.z.toFixed(1)}</b> mm`;
+  UI.cutMax=Math.max(1,+b.max.z.toFixed(1));     // the flatten-bottom slider spans the part's height
 }
 
 function frameCamera(){
@@ -358,6 +374,16 @@ function frameCamera(){
   controls.target.set(0,0,r*0.3);
   camera.position.set(r*2.2,-r*2.8,r*2.4);
   camera.updateProjectionMatrix();
+}
+/* Joints step: fit the part AND its mated neighbour, seen from higher up — placing pin & hole is an XY job */
+function frameJoints(){
+  S.baseGeo.computeBoundingBox();
+  const box=S.baseGeo.boundingBox.clone();
+  if(anchorsValid()) box.union(S.baseGeo.boundingBox.clone().applyMatrix4(relMate()));
+  const c=box.getCenter(new THREE.Vector3()), r=(box.getSize(new THREE.Vector3()).length()/2)||50;
+  controls.target.copy(c);
+  camera.position.set(c.x+r*0.9, c.y-r*1.7, c.z+r*2.3);
+  camera.updateProjectionMatrix(); controls.update();
 }
 
 function contentBounds(){
@@ -437,7 +463,7 @@ function autoAlign(){
   const align=basis.clone().transpose();                        // world→axes (inverse)
   const T=new THREE.Matrix4().makeTranslation(-cx,-cy,-cz);
   bakeMatrix(new THREE.Matrix4().multiplyMatrices(align,T));
-  status('Auto-aligned to principal axes. Now pick the face to lay flat.','ok');
+  status('Auto-oriented along the part’s main axes. If it isn’t lying flat yet, pick the bottom face.','ok');
 }
 const col=(m,c)=>new THREE.Vector3(m[0][c],m[1][c],m[2][c]);
 
@@ -519,10 +545,10 @@ function enterSculpt(){
   applySculptMirror();
   history.clear();                 // fresh undo timeline for this sculpt session
   sculpt.enable();
-  status('Sculpt: left-drag to paint, Alt+drag to orbit, right-drag to pan.','ok');
+  status('Sculpt: drag on the part. Alt+drag rotates the view, right-drag moves it.');
 }
 function exitSculpt(){
-  sculpt.disable();
+  sculpt.disable(); status('');
   // refresh everything downstream that reads S.baseGeo
   S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;   // chain build rebuilds via ensureBVH()
   if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; } // pre-simplify master no longer valid
@@ -614,10 +640,11 @@ function enterHeight(){
   if(heightEditor.out) disp.setHeightBuffer(heightEditor.out, heightEditor.width, heightEditor.height);
   history.clear();                 // fresh undo timeline for this heightmap session
   disp.enable();
-  status('Heightmap: load an image, then left-drag to paint relief. Alt+drag orbits.','ok');
+  status(heightEditor.out ? 'Relief: drag on the part to paint it on. Alt+drag rotates the view.'
+                          : 'Relief: load a greyscale image first, then drag on the part to paint it on.');
 }
 function exitHeight(){
-  disp.disable();
+  disp.disable(); status('');
   // same downstream invalidation as exitSculpt — geometry changed in place
   S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;
   if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }
@@ -640,7 +667,6 @@ function pickFace(hit){
   S.highlight=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xffcc66,side:THREE.DoubleSide,
     transparent:true,opacity:.85,depthTest:false}));
   S.highlight.renderOrder=999; scene.add(S.highlight);
-  status(`Face picked (normal ${fmtV(S.pickedNormal)}). Press “Lay flat”.`,'ok');
 }
 
 function layFlat(){
@@ -653,7 +679,7 @@ function layFlat(){
   clearHighlight(); S.pickedNormal=null;
   alignInPlane();
   frameCamera();
-  status('Laid flat & in-plane aligned. Use “Rotate to align” or Z-90° to fine-tune.','ok');
+  status('Laid flat on the picked face. Turn it 90° around Z if it points the wrong way.','ok');
 }
 
 /* ----- FLATTEN BOTTOM: slice off everything below a Z height, cap the new floor ----- */
@@ -986,13 +1012,34 @@ function buildPoses(){
 //   // let freq = 4, amp = 0.3;
 //   // const n = 1 + (((n_it_nor * freq) % 1) < 0.5 ? amp : -amp);
 //   // return { x: n, y: n, z: n };`;
-const DEFAULT_SCALE_CODE = `// n_it     – index of this part (0 … count-1)
-// n_it_nor – that index normalized to 0 … 1
-// Return either a single number (uniform scale) or {x, y, z} to scale each axis
-// independently (1 = original size on that axis; any axis you omit defaults to 1).
-const TAU = Math.PI * 2;
+const SCALE_DOC = `// n_it = link number (0 … count-1), n_it_nor = the same from 0 … 1.
+// Return a number, or {x, y, z} to scale each axis (1 = original size).
+`;
+/* one-click starting points for the size editor (the "Size along the chain" preset buttons) */
+const SCALE_PRESETS = {
+  same  : SCALE_DOC + `
+// Every link the same size.
+return 1;`,
+  taper : SCALE_DOC + `
+// Taper: full size at the start, shrinking to "end" at the last link.
+const end = 0.5;
+return 1 + (end - 1) * n_it_nor;`,
+  grow  : SCALE_DOC + `
+// Grow: starts at "start", reaching full size at the last link.
+const start = 0.5;
+return start + (1 - start) * n_it_nor;`,
+  belly : SCALE_DOC + `
+// Belly: thickest in the middle, slimmer towards both ends.
+const amp = 0.4;
+return 1 - amp + amp * Math.sin(n_it_nor * Math.PI);`,
+  wave  : SCALE_DOC + `
+// Wave: swells and shrinks several times along the chain.
+const waves = 4, amp = 0.15;
+return 1 + amp * Math.sin(n_it_nor * Math.PI * 2 * waves);`,
+  scales: SCALE_DOC + `const TAU = Math.PI * 2;
 
-let n_freq = 6; 
+// Zig-zag: repeated ramps that also taper off towards the end.
+let n_freq = 6;
 let nitn = (n_it_nor*n_freq)%1;
 let namp = .3;
 let noff = 1;
@@ -1002,7 +1049,9 @@ let ny_linear = (-Math.abs(nitn-0.5)+0.5)*namp + noff;
 let ny_sine = (Math.sin(nitn*TAU)*.5+0.5)*namp;
 let n = ny_linear;
 n-= n_it_nor*.2;
-return { x: n, y: n, z: n };`
+return { x: n, y: n, z: n };`,
+};
+const DEFAULT_SCALE_CODE = SCALE_PRESETS.same;
 
 function compileScaleFn(code){
   let fn;
@@ -1031,14 +1080,15 @@ async function ensureScaleEditor(){
   scaleEditor=monaco.editor.create($('scaleEditor'),{
     value:S.scaleCode||DEFAULT_SCALE_CODE,
     language:'javascript', theme:'vs-dark',
-    minimap:{enabled:false}, fontSize:12, lineNumbers:'on', tabSize:2,
+    minimap:{enabled:false}, fontSize:12, lineNumbers:'off', folding:false, glyphMargin:false,
+    lineDecorationsWidth:10, wordWrap:'on', tabSize:2,
     scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
   });
   scaleEditor.onDidChangeModelContent(()=>applyScaleCode(scaleEditor.getValue()));
 }
 
 /* ---- per-part colour ---- */
-const DEFAULT_COLOR_CODE =
+const COLOR_DOC =
 `// n_it     – index of this part (0 … count-1)
 // n_it_nor – that index normalized to 0 … 1
 // base     – this part's natural colour as {r, g, b}, each 0 … 1
@@ -1048,10 +1098,26 @@ const DEFAULT_COLOR_CODE =
 //               or {r, g, b} 0…1. The tint MULTIPLIES a coloured model's own
 //               colours; on a plain, un-coloured part it sets the colour outright.
 //   base      – leave this part untouched
-
+`;
+const DEFAULT_COLOR_CODE = COLOR_DOC + `
 // Swap the colours on every 2nd part:
 if (n_it % 2 === 1) return 'invert';
 return base;`;
+/* one-click starting points for the colour editor (the "Colour along the chain" preset buttons) */
+const COLOR_PRESETS = {
+  alternate: DEFAULT_COLOR_CODE,
+  plain    : COLOR_DOC + `
+// Every link keeps its own colour.
+return base;`,
+  gradient : COLOR_DOC + `
+// Blend from one colour to another along the chain (r, g, b each 0 … 1).
+const from = [0.20, 0.60, 1.00], to = [1.00, 0.30, 0.50];
+const mix = i => from[i] + (to[i] - from[i]) * n_it_nor;
+return { r: mix(0), g: mix(1), b: mix(2) };`,
+  rainbow  : COLOR_DOC + `
+// Rainbow along the chain.
+return 'hsl(' + Math.round(n_it_nor * 300) + ', 80%, 55%)';`,
+};
 
 function isInvert(v){ return v==='invert' || (v && typeof v==='object' && v.invert===true); }
 // Mutate `out` (a THREE.Color) from a user-returned colour value; leave it
@@ -1104,25 +1170,19 @@ async function ensureColorEditor(){
   colorEditor=monaco.editor.create($('colorEditor'),{
     value:S.colorCode||DEFAULT_COLOR_CODE,
     language:'javascript', theme:'vs-dark',
-    minimap:{enabled:false}, fontSize:12, lineNumbers:'on', tabSize:2,
+    minimap:{enabled:false}, fontSize:12, lineNumbers:'off', folding:false, glyphMargin:false,
+    lineDecorationsWidth:10, wordWrap:'on', tabSize:2,
     scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
   });
   colorEditor.onDidChangeModelContent(()=>applyColorCode(colorEditor.getValue()));
 }
 
 /* ---- chain centre-line ---- */
+/* (the full explanation of t / n_it / z_stack lives in the panel, under "How the code works") */
 const PATH_DOC =
-`// Chain centre-line.  t grows continuously along the chain (its scale depends on
-// the curve, NOT 1-per-link — don't use it to count links). n_it is the index (0…count-1)
-// of the link currently being placed; n_it_nor is that index normalized to 0…1.
-// Use n_it / n_it_nor for anything that should step per link.
-// z_stack is the height (mm) ALREADY added by the pin/hole z slider's stair-stepping, before
-// this link — it's informational, the engine applies it on top of your z automatically. Read
-// it if your own z formula needs to react to the current stair height; don't return it as-is
-// (z_stack + z_stack would double it) — it's already added even if you just "return z: 0".
-// Return the joint {x, y, z} in mm. z is optional (defaults to 0 = flat on the plate). It only
-// ever LIFTS each link — rotation is always computed in the x/y plane only, so z (from here, or
-// from the pin/hole slider) never tilts a link, just stacks it higher/lower.`;
+`// Chain centre-line: return the point {x, y, z} in mm for a position t along the curve.
+// t grows continuously (NOT one per link) — count links with n_it (0 … count-1) or n_it_nor (0 … 1).
+// z only lifts a link, never tilts it. z_stack = height already added by the pin/hole Z offset.`;
 // shape: 'straight' (default) or 'spiral'. The Shape selector + sliders rewrite this function.
 function pathCodeFor(shape, a, b){
   const f=n=>Number.isFinite(n)?String(Math.round(n*1000)/1000):'0';
@@ -1168,7 +1228,8 @@ async function ensurePathEditor(){
   pathEditor=monaco.editor.create($('pathEditor'),{
     value:S.pathCode||pathCodeFor('straight',25,16/(2*Math.PI)),
     language:'javascript', theme:'vs-dark',
-    minimap:{enabled:false}, fontSize:12, lineNumbers:'on', tabSize:2,
+    minimap:{enabled:false}, fontSize:12, lineNumbers:'off', folding:false, glyphMargin:false,
+    lineDecorationsWidth:10, wordWrap:'on', tabSize:2,
     scrollBeyondLastLine:false, automaticLayout:true, padding:{top:8,bottom:8},
   });
   pathEditor.onDidChangeModelContent(()=>applyPathCode(pathEditor.getValue()));
@@ -1397,7 +1458,7 @@ function regen(force){
   S.poses=poses;
   const mm=S.chainLength;
   UI.chainLenVal = mm>=1000 ? `${(mm/1000).toFixed(2)} m` : `${mm.toFixed(1)} mm`;
-  UI.chainLenSub = `${poses.length} links · ${(mm/poses.length).toFixed(2)} mm avg pin↔hole span`;
+  UI.chainLenSub = `${poses.length} links · ${(mm/poses.length).toFixed(1)} mm from joint to joint`;
   if(S.selectedLink!=null && S.selectedLink>=poses.length){ S.selectedLink=null; updateSwapUI(); }
   renderChain(poses);
   const doCheck = force || poses.length<=CONST.COLLISION_AUTO_MAX;
@@ -1416,6 +1477,9 @@ function regen(force){
   else if(bad.size===0){UI.chipCollide=`<span class="ok">✓ no overlaps</span> · ${pairs} pairs tested`;}
   else{UI.chipCollide=`<span class="err">✗ ${bad.size} links overlap</span>`;}
   UI.chipSize=`footprint <b>${fs.x.toFixed(0)}×${fs.y.toFixed(0)}</b> mm`;
+  // the same facts, structured, for the status card on the Chain / Export pages
+  UI.chainState = !doCheck ? 'unchecked' : bad.size ? 'bad' : 'ok';
+  UI.chainBad=bad.size; UI.chainFoot=`${fs.x.toFixed(0)} × ${fs.y.toFixed(0)} mm`; UI.chainOff=off;
   let msg=`${poses.length} links · footprint ${fs.x.toFixed(0)}×${fs.y.toFixed(0)} mm.`;
   let kind = bad.size? 'err':'ok';
   if(!doCheck){ msg+=' Collision check skipped (large count) — press “Re-check”.'; kind=''; }
@@ -1467,7 +1531,8 @@ function writeOBJ(geo){
   return out.join('\n')+'\n';
 }
 async function encodeChain(mesh, geo, fmt){
-  const base=S.meshName||'articulated_spiral';
+  const title=(UI.projectTitle||S.meshName||'').trim().replace(/[^\w.-]+/g,'_');
+  const base=(title && title!=='part' ? title : 'articulated')+'-chain';
   if(fmt==='stl'){
     const dv=new STLExporter().parse(mesh,{binary:true});
     return {blob:new Blob([dv],{type:'application/octet-stream'}), name:base+'.stl'};
@@ -1685,8 +1750,8 @@ async function applyConfig(cfg){
       UI.mirrorOffset=cfg.mirror.offset||0;
       if(UI.mirrorEnabled) updateMirroredBase();
     }
+    lsClearAll();                               // the previous project's morph points don't belong to this one
     if(Array.isArray(cfg.lsNodes) && cfg.lsNodes.length){
-      lsClearAll();
       for(const n of cfg.lsNodes){
         // set UI values so lsAddNode picks them up for the arrow/sphere sizing
         if(UI){ UI.lsRadius=n.radius; UI.lsIntensity=n.intensity;
@@ -1727,9 +1792,9 @@ async function applyConfig(cfg){
       try{ await decoRestore(cfg.deco); if(S.deco&&S.deco.fused) markDone('deco'); }
       catch(err){ status('The decoration failed to load: '+err.message,'err'); }
     }
-    markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('deco'); unlock('s2'); unlock('s3'); buildGizmos();
+    markDone('s1'); markDone('s2'); unlock('s2'); unlock('s3'); unlock('s4'); buildGizmos();
     setAnchorRanges();
-    ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); openStep('s3'); regen();
+    ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); openStep('s3',true);   // rebuilds + frames the chain
     UI.dropHide=true;
   } finally { UI._loading=false; }
 }
@@ -1771,7 +1836,8 @@ async function apiUpdate(id,patch){
 }
 async function apiDelete(id){ const r=await fetch(`${API}/${id}`,{method:'DELETE'}); if(!r.ok)throw new Error(await r.text()); return r.json(); }
 
-function projStatus(msg,kind=''){ if(UI){ UI.projMsg=msg; UI.projMsgErr=(kind==='err'); } }
+/* shown in the Projects dialog and echoed to the viewport status line (the header's Save button has no dialog open) */
+function projStatus(msg,kind=''){ if(UI){ UI.projMsg=msg; UI.projMsgErr=(kind==='err'); } status(msg, kind==='err'?'err':'ok'); }
 
 async function refreshProjects(){
   if(!hasServer){ UI.hasServer=false; UI.projects=[]; return; }
@@ -1787,7 +1853,7 @@ async function saveNewProject(){
   try{
     await ensureMeshUploaded(); await ensureOverridesUploaded(); await ensureDecoUploaded();
     const p=await apiCreate(name,gatherConfig());
-    UI.projectId=p.id; UI.projectName='';
+    UI.projectId=p.id; UI.projectName=p.name; UI.projectTitle=p.name;
     projStatus(`Saved “${p.name}”.`); refreshProjects();
   }catch(e){ projStatus('Save failed: '+e.message,'err'); }
 }
@@ -1798,23 +1864,25 @@ async function updateCurrentProject(){
     await ensureMeshUploaded(); await ensureOverridesUploaded(); await ensureDecoUploaded();
     const name=(UI.projectName||'').trim();
     const p=await apiUpdate(UI.projectId,{name:name||undefined,config:gatherConfig()});
-    projStatus(`Updated “${p.name}”.`); refreshProjects();
-  }catch(e){ projStatus('Update failed: '+e.message,'err'); }
+    UI.projectName=p.name; UI.projectTitle=p.name;
+    projStatus(`Saved “${p.name}”.`); refreshProjects();
+  }catch(e){ projStatus('Save failed: '+e.message,'err'); }
 }
 async function loadProject(id){
   try{
     const p=await apiGet(id);
     await applyConfig(p.config||{});
-    UI.projectId=p.id; UI.projectName=p.name;
-    projStatus(`Loaded “${p.name}”.`); refreshProjects();
+    UI.projectId=p.id; UI.projectName=p.name; UI.projectTitle=p.name;
+    projStatus(`Opened “${p.name}”.`); refreshProjects();
   }catch(e){ projStatus('Load failed: '+e.message,'err'); }
 }
 async function deleteProject(id){
-  if(!confirm('Delete this project?'))return;
+  const p=UI.projects.find(q=>q.id===id);
+  if(!confirm(`Delete the project “${p?p.name:id}”? This can't be undone.`))return;
   try{
     await apiDelete(id);
-    if(UI.projectId===id)UI.projectId=null;
-    projStatus('Deleted.'); refreshProjects();
+    if(UI.projectId===id){ UI.projectId=null; UI.projectTitle=''; }
+    projStatus('Project deleted.'); refreshProjects();
   }catch(e){ projStatus('Delete failed: '+e.message,'err'); }
 }
 
@@ -1863,7 +1931,10 @@ function loadArrayBuffer(buf,name){
   S.meshName=name.replace(/\.[^.]+$/,'')||'part';   // remember for the upload filename
   S.loadFormat=(name.toLowerCase().split('.').pop())||'stl';   // export the chain back in this format
   S.meshId=null;                                     // a fresh file supersedes any saved mesh
-  parseMeshFile(buf,name).then(g=>setBaseGeometry(g)).catch(e=>status('Load error: '+e.message,'err'));
+  parseMeshFile(buf,name).then(g=>{
+    setBaseGeometry(g);
+    if(S.uiStep!=='s1') openStep('s1');              // a new part always starts on the Part page (never on top of the old chain)
+  }).catch(e=>status('Load error: '+e.message,'err'));
 }
 function loadFile(file){
   status('Loading '+file.name+'…');
@@ -1980,15 +2051,16 @@ function syncMatePreview(){
   if(!S.matePreview) return;
   const show=UI.matePreviewOn && S.uiStep==='s2' && !!S.partMesh && S.partMesh.visible && anchorsValid();
   S.matePreview.visible=show;
-  if(!show){ UI.mateOut=''; return; }
+  if(!show){ UI.mateOut=''; UI.mateState=''; return; }
   const M=relMate();
   S.matePreview.matrix.copy(M); S.matePreview.updateMatrixWorld(true);
   ensureBVH();
   const hit=S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,M);
   S.matePreview.material.color.set(hit?0xff6b6b:CONST.MATE_COLOR);
+  UI.mateState = hit ? 'bad' : 'ok';
   UI.mateOut = hit
-    ? '<span style="color:var(--bad)">✗ neighbour meshes overlap — links would fuse. Move pin/hole apart or pick a cleaner mating spot.</span>'
-    : '<span style="color:var(--accent2)">✓ neighbour clears — the two meshes don\'t touch at this mating.</span>';
+    ? 'The next link overlaps this one — the two would fuse when printed. Move the pin and hole further apart, or to a spot with more room.'
+    : 'The next link clears this one — they don’t touch.';
 }
 
 /* ---- SIMPLIFY ---- */
@@ -2015,8 +2087,8 @@ function updateSimEstimate(){
   const fullTotal=Math.round(baseFull*baseLinks+ovTris);
   const note = ovCount?`, ${ovCount} custom`:'';
   UI.simEst = pct>0
-    ? `${fullV.toLocaleString()} → <b>${tgtV.toLocaleString()}</b> verts/link · whole chain ≈ <b>${fmtBytes(estStlBytes(tgtTotal))}</b> (${links} links${note})`
-    : `${fullV.toLocaleString()} verts/link · whole chain ≈ ${fmtBytes(estStlBytes(fullTotal))} (${links} links${note})`;
+    ? `${fullV.toLocaleString()} → <b>${tgtV.toLocaleString()}</b> verts/link · whole chain ≈ <b>${fmtBytes(estStlBytes(tgtTotal))}</b> as STL (${links} links${note})`
+    : `${fullV.toLocaleString()} verts/link · whole chain ≈ ${fmtBytes(estStlBytes(fullTotal))} as STL (${links} links${note})`;
 }
 function swapBaseGeometry(geo, {weld=true}={}){
   if(weld) geo = weldByPosition(geo);
@@ -2035,6 +2107,7 @@ function swapBaseGeometry(geo, {weld=true}={}){
   if(S.matePreview) S.matePreview.geometry=geo;
   if(old){ old.disposeBoundsTree?.(); old.dispose(); }     // chain is rebuilt by regen() right after
   history?.clear();                                        // topology changed → old snapshots are invalid
+  if(UI) UI.partHasColor=hasVColor(geo);
   updatePartEdges(); updateDebugViz(); updateMeshChips();
 }
 let _simplifierP=null;
@@ -2288,7 +2361,7 @@ function updateSwapUI(){
   const has=S.selectedLink!=null;
   UI.swapSel = has
     ? `Link #${S.selectedLink} selected — ${S.overrides.has(S.selectedLink)?'custom: '+S.overrides.get(S.selectedLink).name:'base part'}`
-    : 'No link selected — click “Select link in viewport”, then a link.';
+    : 'No link selected yet.';
   UI.swapFileBtnDisabled=!has;
   UI.swapClearDisabled=!(has&&S.overrides.has(S.selectedLink));
   UI.swapClearAllDisabled=S.overrides.size===0;
@@ -2310,7 +2383,26 @@ function replaceSelectedLink(file){
 /* ======================================================================== *
  *  WIZARD GATING + low-level helpers used by the Alpine component
  * ======================================================================== */
-function openStep(id){ if(UI){ UI.openId=id; UI.activeId=id; } showStepView(id); }
+/* The four main steps are s1 Part → s2 Joints → s3 Chain → s4 Export; the optional
+   part tools (sculpt / height / lsculpt / deco) are sub-pages opened from the Part page. */
+const TOOL_IDS=new Set(['sculpt','height','lsculpt','deco']);
+/* what a page shows in the viewport — the camera is only re-framed when this changes */
+const viewKind = id => (id==='s3'||id==='s4') ? 'chain' : id==='s2' ? 'joints' : id==='deco' ? 'deco' : 'part';
+function openStep(id, force){
+  const prev=S.uiStep;
+  if(UI){ UI.openId=id; UI.activeId=id; UI.arm=null; }
+  showStepView(id);
+  if(UI) UI.$nextTick(()=>{ const p=$('pages'); if(p) p.scrollTop=0; });
+  if(!S.baseGeo) return;
+  const kind=viewKind(id), changed = force || kind!==viewKind(prev);
+  if(kind==='chain'){
+    if(anchorsValid() && (changed || !S.poses.length)){ regen(); if(changed) setView('iso'); }
+    return;
+  }
+  updateMeshChips(); UI.chipCollide='';              // the HUD describes the single part again
+  if(viewKind(prev)==='chain') status('');
+  if(changed){ kind==='deco' ? decoFrame() : kind==='joints' ? frameJoints() : frameCamera(); }
+}
 function unlock(id){ if(UI)UI.steps[id].locked=false; }
 function markDone(id){ if(UI)UI.steps[id].done=true; }
 
@@ -2455,7 +2547,7 @@ function lsSyncNodeList(){
   if(!UI) return;
   UI.lsNodes=S.lsNodes.map((n,i)=>({
     idx:i,
-    label:`Node ${i+1} · ${n.mode} · ±${n.intensity}mm · r=${n.radius}mm`,
+    label:`Point ${i+1} · ${n.mode} ${n.intensity} mm · reach ${n.radius} mm`,
   }));
 }
 
@@ -2529,12 +2621,14 @@ function lsEnter(){
   lsGroup.visible=true;
   lsXform.visible=S.lsActiveNodeIdx>=0; lsXform.enabled=S.lsActiveNodeIdx>=0;
   lsPreviewUpdate();
+  status(S.lsNodes.length ? 'Morph: select a point to change it, or add another one.'
+                          : 'Morph: press “Add a point”, then click the part where it should change.');
 }
 
 function lsExit(){
   lsGroup.visible=false;
   lsXform.detach(); lsXform.visible=false; lsXform.enabled=false;
-  lsRevertPreview();
+  lsRevertPreview(); status('');
   if(S.poses.length) regen();   // rebuild the chain with updated loop sculpt params
 }
 
@@ -2618,7 +2712,7 @@ function decoPrepWork(g){          // a fetched / inline mesh → indexed, Float
 }
 async function decoLoadFiles(fileList){
   const files=[...fileList]; if(!files.length) return;
-  if(!S.baseGeo){ status('Load the link part first (Step 1), then the object.','err'); return; }
+  if(!S.baseGeo){ status('Load the link part first (Part step), then the object.','err'); return; }
   UI.decoBusy=true; status('Loading object…'); UI.decoInfo='Loading…';
   await new Promise(r=>setTimeout(r,30));            // let the panel repaint before the heavy parse
   try{
@@ -2790,7 +2884,7 @@ function decoCheck(){
     ? '<span style="color:var(--accent2)">✓ overlaps the link — they fuse into one piece.</span>'
     : '<span style="color:var(--bad)">✗ doesn\'t touch the link — it would print as a separate loose piece. Use “Drop onto link”.</span>';
   if(!anchorsPlaced()){
-    UI.decoMate='<span style="color:#888">Mark pin &amp; hole (step 2) to check the object against the neighbouring links.</span>';
+    UI.decoMate='<span style="color:#888">Place the pin &amp; hole (Joints step) to check the object against the neighbouring links.</span>';
     decoSyncGhost(false); return;
   }
   // the neighbour sits hole-on-pin (T); 2nd neighbour = T² — a long object can reach past the next link
@@ -2846,6 +2940,9 @@ function decoEnter(){
   history.clear();                         // fresh undo timeline for this placement session
   decoSyncVisibility();
   if(S.deco&&S.deco.mesh) decoChanged(true);
+  status(!S.deco ? 'Load the object you want to sit on every link.'
+       : S.deco.fused ? 'The object is fused into the link. “Edit placement” makes it movable again.'
+       : 'Drag the handles to place the object on the link.');
 }
 function decoExit(){
   if(S.deco&&S.deco.mesh&&!S.deco.fused) decoFuse();
@@ -2938,7 +3035,7 @@ function decoDetachFromLink(){
 function decoRemove(){
   if(!S.deco) return;
   if(S.deco.fused){
-    if(!S.deco.linkPreFuse){ status('This object is baked into the saved part (no plain link stored) — load the plain link in Step 1 instead.','warn'); return; }
+    if(!S.deco.linkPreFuse){ status('This object is baked into the saved part (no plain link stored) — load the plain link in the Part step instead.','warn'); return; }
     decoUnfuse();
   }
   decoDispose();
@@ -2999,6 +3096,7 @@ function showStepView(id){
   if(wasHeight && id!=='height') exitHeight();
   if(wasLS     && id!=='lsculpt') lsExit();
   if(wasDeco   && id!=='deco') decoExit();      // leaving with a placed object fuses it into the link
+  if(id!=='s1') clearCutPreview();              // the flatten-bottom plane belongs to the Part page only
   if(id==='sculpt'  && !sculpt.active && S.baseGeo) enterSculpt();
   if(id==='height'  && !disp.active  && S.baseGeo) enterHeight();
   if(id==='lsculpt' && S.baseGeo) lsEnter();
@@ -3025,7 +3123,15 @@ function syncViewVisibility(){
   syncPartEdges();
 }
 
-/* ---- arm helper for click-modes (the pills are driven by UI.arm) ---- */
+/* ---- arm helper for click-modes: the next click in the viewport does `mode` (UI.arm drives the
+        banner + crosshair cursor; Esc or pressing the same button again cancels) ---- */
+const ARM_HINTS={
+  pickFace :'Click the face of the part that should rest on the plate',
+  placePin :'Click where the pin is',
+  placeHole:'Click where the hole is',
+  pickLink :'Click the link you want to swap',
+  lsPick   :'Click a point on the part',
+};
 function setArm(mode){ if(!UI)return; UI.arm = (UI.arm===mode)?null:mode; }
 
 function debounceRegen(){clearTimeout(regenTimer);regenTimer=setTimeout(regen,80);}
@@ -3073,7 +3179,11 @@ renderer.domElement.addEventListener('pointerdown',ev=>{
   if(!UI||!UI.arm||ev.button!==0)return;
   if(UI.arm==='pickLink'){ selectLinkAt(ev); setArm(null); return; }   // raycasts the chain, not the part
   const hit=rayPart(ev);
-  if(UI.arm==='pickFace'){ if(hit)pickFace(hit); setArm(null); return; }
+  if(UI.arm==='pickFace'){                       // one click: pick the face and lay the part flat on it
+    if(hit){ pickFace(hit); layFlat(); setArm(null); }
+    else status('That click missed the part — click directly on the face that should rest on the plate.','warn');
+    return;
+  }
   if(UI.arm==='lsPick'){
     if(hit){
       const {face}=hit, posAttr=S.baseGeo.getAttribute('position');
@@ -3155,7 +3265,7 @@ window.addEventListener('pointerup',()=>{
   });
   handle.addEventListener('pointermove',ev=>{
     if(!dragging) return;
-    const w=Math.min(Math.max(ev.clientX,280),Math.min(window.innerWidth-280,1100));
+    const w=Math.min(Math.max(ev.clientX,320),Math.min(window.innerWidth-280,1100));
     root.style.setProperty('--panel-w',w+'px');
     if(scaleEditor) scaleEditor.layout();
     if(colorEditor) colorEditor.layout();
@@ -3172,35 +3282,35 @@ window.addEventListener('pointerup',()=>{
   });
 })();
 
-/* ---- small format helpers ---- */
-function fmtV(v){return `${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)}`;}
-
 /* ======================================================================== *
  *  ALPINE COMPONENT — all reactive UI state + the template entry points
  * ======================================================================== */
 function chainApp(){
   return {
     /* ----- status / wizard ----- */
-    statusMsg:'Drop a part or use “Choose file…”.', statusKind:'',
-    openId:'s1', activeId:'s1',
-    steps:{ proj:{done:false,locked:false}, s1:{done:false,locked:false},
-            sculpt:{done:false,locked:true}, height:{done:false,locked:true},
-            lsculpt:{done:false,locked:true}, deco:{done:false,locked:true},
-            s2:{done:false,locked:true}, s3:{done:false,locked:true}, s4:{done:false,locked:true} },
+    statusMsg:'Choose a 3D file — or drop it onto the view.', statusKind:'',
+    openId:'s1', activeId:'s1',        // the page shown in the side panel: a main step (s1…s4) or a part tool
+    toolBack:'s1',                     // main step a part tool returns to
+    steps:{ s1:{done:false,locked:false}, s2:{done:false,locked:true},
+            s3:{done:false,locked:true}, s4:{done:false,locked:true},
+            sculpt:{done:false,locked:false}, height:{done:false,locked:false},
+            lsculpt:{done:false,locked:false}, deco:{done:false,locked:false} },
     arm:null,
     _loading:false,
     /* ----- drop overlay ----- */
     dropHide:false, dropHot:false,
     /* ----- HUD chips ----- */
-    chipMesh:'No mesh loaded', chipSize:'', chipCollide:'',
+    chipMesh:'', chipSize:'', chipCollide:'',
     /* ----- step 1 ----- */
+    hasPart:false, partName:'', partHasColor:false, halfDetected:false,
+    partSize:40,                       // the part's longest side (mm) — scales the brush / morph sliders
     unitScale:1, colorShades:2, purify:false, partX:0, partY:0, partZ:0,
     symOut:'',
     simAuto:true, simMaxVerts:2000, simPct:0,
     simEst:'', dbgOut:'Load a part to see its vertex / triangle count.',
     simResetDisabled:true, simApplyDisabled:false,
     showVerts:false, showWire:false,
-    cutHeight:0, cutPreview:false, hasCutUndo:false,
+    cutHeight:0, cutMax:20, cutPreview:false, hasCutUndo:false,
     s1nextDisabled:true,
     /* ----- sculpt (optional step) ----- */
     sculptTool:'draw', sculptRadius:8, sculptStrength:0.5,
@@ -3225,14 +3335,15 @@ function chainApp(){
     /* ----- step 2 ----- */
     pin:{x:0,y:0,z:0}, hole:{x:0,y:0,z:0},
     anchorXmin:-100, anchorXmax:100, anchorYmin:-100, anchorYmax:100, anchorZmin:-20, anchorZmax:20,
-    mateOut:'', matePreviewOn:true, anchorWarn:'', s2nextDisabled:true,
+    mateOut:'', mateState:'', matePreviewOn:true, anchorWarn:'', s2nextDisabled:true,
     /* ----- step 3 ----- */
     chainLenVal:'—', chainLenSub:'',
+    chainState:'', chainBad:0, chainFoot:'', chainOff:false,   // filled by regen(): '' | 'ok' | 'bad' | 'unchecked'
     shape:'straight', count:14, startR:25, spacing:16, plate:220,
     scaleErr:'', scaleErrColor:'', colorErr:'', colorErrColor:'', pathErr:'', pathErrColor:'', solveOut:'',
     s3nextDisabled:true,
     /* ----- step 4 ----- */
-    swapSel:'No link selected — click “Select link in viewport”, then a link.',
+    swapSel:'No link selected yet.',
     swapFileBtnDisabled:true, swapClearDisabled:true, swapClearAllDisabled:true,
     gizmoActive:false, gizmoMode:'translate',
     exportOut:'', exportLabel:'⬇ Download STL', exportFmt:'auto',
@@ -3244,8 +3355,10 @@ function chainApp(){
     decoSpace:'local', decoSnap:false, decoSink:1, decoMateOn:true, decoFuseMode:'csg', decoNeedCap:0,
     /* ----- render toggles ----- */
     xray:false, section:false, sectionZ:100, sectionZval:'',
-    /* ----- projects ----- */
+    /* ----- projects (header buttons + dialog) ----- */
     projectName:'', projMsg:'', projMsgErr:false, projects:[], projectId:null, hasServer:true,
+    projectTitle:'',                   // name of the project that is open (projectName is the editable field)
+    projOpen:false, projFilter:'',
 
     /* ---- lifecycle ---- */
     init(){
@@ -3278,7 +3391,10 @@ function chainApp(){
       this.$watch('simMaxVerts', ()=>{ if(this.simAuto)autoFitReduction(false); else updateSimEstimate(); });
       this.$watch('simPct', ()=>updateSimEstimate());
       this.$watch('sectionZ', ()=>updateSectionPlane());
-      this.$watch('cutHeight', ()=>updateCutPreview());
+      this.$watch('cutHeight', v=>{              // moving the slider shows the cut plane — no separate "preview" toggle
+        if(v>0 && S.baseGeo && S.uiStep==='s1') this.cutPreview=true; else if(!(v>0)) clearCutPreview();
+        updateCutPreview();
+      });
       this.$watch('sculptTool',     v=>sculpt.brush.type=v);
       this.$watch('sculptRadius',   v=>sculpt.brush.radius=v);
       this.$watch('sculptStrength', v=>sculpt.brush.strength=v);
@@ -3327,47 +3443,94 @@ function chainApp(){
 
       syncSimMode();          // controls start in the (default) automatic mode
       refreshProjects();
-      status('Drop a part or use “Choose file…”.');
+      status('Choose a 3D file — or drop it onto the view.');
     },
 
     /* ---- wizard navigation ---- */
-    toggleStep(id){
-      if(this.steps[id].locked) return;
-      if(this.openId===id){ this.openId=''; return; }   // collapse
-      this.openId=id; this.activeId=id;
-      showStepView(id);
-      const toChain=(id==='s3'||id==='s4');
-      if(toChain){ if(S.baseGeo && anchorsValid()) regen(); }
-      else if(S.baseGeo){ id==='deco' ? decoFrame() : frameCamera(); }
+    get isTool(){ return TOOL_IDS.has(this.openId); },
+    get mainStep(){ return this.isTool ? 's1' : this.openId; },      // the part tools belong to the Part step
+    stepState(id){
+      return { cur:this.mainStep===id, done:this.steps[id].done && this.mainStep!==id,
+               locked: id!=='s1' && (!this.hasPart || ((id==='s3'||id==='s4') && this.steps.s3.locked)) };
     },
-    async s1Next(){
-      if(!S.baseGeo)return;
+    stepTitle(id){
+      if(id==='s1') return 'Load and orient the link';
+      if(!this.hasPart) return 'Load a part first';
+      if(id==='s2') return 'Mark the pin and the hole';
+      if(this.steps.s3.locked) return 'Place the pin and hole, then build the chain';
+      return id==='s3' ? 'Shape and length of the chain' : 'Download the printable file';
+    },
+    /* a click in the step bar: go there if it's reachable, otherwise advance one step the way the Next buttons would */
+    async goStep(id){
+      if(this.openId===id) return;
+      if(!this.hasPart){ if(id!=='s1') status('Load a part first — choose a file or drop it onto the view.','warn'); return; }
+      if(id==='s1'){ openStep('s1'); return; }
+      if(this.isTool) openStep('s1');              // finish the brush / placement session before the part is prepared
+      if(id==='s2'){ await this.s1Next(); return; }
+      if(this.steps.s3.locked){                    // the chain hasn't been built yet
+        if(this.openId==='s2') await this.s2Next();
+        else{ await this.s1Next(); status('Place the pin and hole first, then press “Build chain”.'); }
+        return;
+      }
+      if(id==='s3') openStep('s3'); else this.s3Next();
+    },
+    toggleStep(id){ return TOOL_IDS.has(id) ? this.openTool(id) : this.goStep(id); },   // older name, kept for scripts
+    get backLabel(){ return this.isTool ? '← Back' : ({s2:'← Part', s3:'← Joints', s4:'← Chain'})[this.openId] || ''; },
+    goBack(){ if(this.isTool) this.closeTool(); else this.goStep(({s2:'s1', s3:'s2', s4:'s3'})[this.openId] || 's1'); },
+    async openTool(id){
+      if(!S.baseGeo || this.openId===id) return;
+      if(!this.isTool) this.toolBack=this.openId;
+      await this.preparePart();
+      openStep(id);
+    },
+    closeTool(){ const back=this.toolBack||'s1'; this.toolBack='s1'; this.goStep(back); },
+    onEscape(){ if(this.projOpen) this.projOpen=false; else if(this.arm) setArm(null); },
+    get armHint(){ return ARM_HINTS[this.arm] || ''; },
+    get mouseHint(){
+      return (this.openId==='sculpt'||this.openId==='height')
+        ? 'Drag: paint · Alt+drag: rotate · Right-drag: move · Scroll: zoom'
+        : 'Drag: rotate · Right-drag: move · Scroll: zoom';
+    },
+    /* everything that has to be true of the part before any later page works on it (safe to repeat) */
+    async preparePart(){
+      if(!S.baseGeo) return false;
       if(this.simAuto) await autoFitReduction(true);   // reduce the part BEFORE any chain work
       const b=S.baseGeo.boundingBox;
       if(this.pin.x===0&&this.pin.y===0&&this.hole.x===0&&this.hole.y===0){
-        this.pin={x:b.max.x*0.7,y:0}; this.hole={x:b.min.x*0.7,y:0};   // seed near the two ends
+        this.pin={x:+(b.max.x*0.7).toFixed(1),y:0,z:0}; this.hole={x:+(b.min.x*0.7).toFixed(1),y:0,z:0};   // seed near the two ends
       }
-      markDone('s1'); unlock('sculpt'); unlock('height'); unlock('lsculpt'); unlock('deco'); unlock('s2'); openStep('s2');
+      markDone('s1'); unlock('s2');
       buildGizmos(); setAnchorRanges();
-      if(S.partMesh)S.partMesh.visible=true;
-      if(S.symGroup)S.symGroup.visible=S.symVisible;     // keep mirror lines visible as anchor guides
-      status('Place the pin and hole anchors on the part.');
+      return true;
+    },
+    async s1Next(){
+      if(!(await this.preparePart())) return;
+      openStep('s2');
+      status('Drag the red pin and the blue hole into place — or press “Place” and click the part.');
     },
     async s2Next(){
-      if(!anchorsValid())return;
+      if(!S.baseGeo||!anchorsValid())return;
       if(this.simAuto) await autoFitReduction(true);   // safety: ensure reduced before the first build
-      markDone('s2'); unlock('s3'); openStep('s3');
-      ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); regen();
+      markDone('s2'); unlock('s3'); unlock('s4');
+      ensureScaleEditor(); ensureColorEditor(); ensurePathEditor();
+      openStep('s3');                                  // builds + frames the chain
     },
     s3Next(){
-      markDone('s3'); unlock('s4'); openStep('s4');
+      if(this.steps.s3.locked) return;
+      markDone('s3'); openStep('s4');
       if(this.simAuto) autoFitReduction(true); else updateSimEstimate();
-      updateSwapUI(); status('Ready to export — or swap individual links.','ok');
+      updateSwapUI();
+      if(this.chainState==='bad') status(`${this.chainBad} links overlap — they would fuse when printed. Fix them on the Chain page first.`,'err');
+      else status('Ready to export.','ok');
     },
 
     /* ---- step 1 actions ---- */
     chooseFile(){ $('fileInput').click(); },
-    onFileInput(e){ if(e.target.files[0])loadFile(e.target.files[0]); },
+    onFileInput(e){ if(e.target.files[0])loadFile(e.target.files[0]); e.target.value=''; },   // reset → the same file can be picked again
+    get brushMax(){ return Math.max(5, Math.ceil(this.partSize*0.75)); },
+    get reachMax(){ return Math.max(5, Math.ceil(this.partSize*1.5)); },
+    get amountMax(){ return Math.max(2, Math.ceil(this.partSize*0.5)); },
+    get simSummary(){ return this.simAuto ? `auto · max ${(+this.simMaxVerts||0).toLocaleString()} vertices per link` : 'manual'; },
     autoAlign, nudge, setArm, layFlat, detectSymmetry, centerPart,
     alignZ(){ alignInPlane(); S.partX=0; this.partX=0; S.partY=0; this.partY=0; S.partZ=0; this.partZ=0; frameCamera(); status('Auto-rotated: longest axis on X.','ok'); },
     resetRotXY(){ rotatePartX(0); this.partX=0; rotatePartY(0); this.partY=0; },
@@ -3376,7 +3539,6 @@ function chainApp(){
     toggleWire(){ this.showWire=!this.showWire; updateDebugViz(); },
     applySimplify, restoreDetail,
     cutFlatBottom, undoCutFlat,
-    toggleCutPreview(){ this.cutPreview=!this.cutPreview; if(this.cutPreview)updateCutPreview(); else clearCutPreview(); },
 
     /* ---- loop sculpt actions ---- */
     mirrorSnap(){
@@ -3390,7 +3552,7 @@ function chainApp(){
     lsSetGizmoMode(m){ this.lsGizmoMode=m; lsXform.setMode(m); },
     lsSelectNode(idx){ lsSelectNode(idx); },
     lsDeleteNode(idx){ lsDeleteNode(idx); },
-    lsClear(){ lsClearAll(); status('Loop sculpt nodes cleared.'); },
+    lsClear(){ lsClearAll(); status('All morph points removed.'); },
     lsApplyCode(){ lsApplyCode(); status('Formula applied.','ok'); },
     lsPreset(code){ lsSetPreset(code); status('Preset applied.','ok'); },
 
@@ -3407,7 +3569,7 @@ function chainApp(){
       heightEditor.setPreviewCanvas(document.getElementById('hmPreview'));
       this.hmLoaded=true;
       if(disp.active) disp.setHeightBuffer(heightEditor.out, heightEditor.width, heightEditor.height);
-      status('Heightmap loaded — left-drag on the part to paint relief.','ok');
+      status('Image loaded — drag on the part to paint the relief.','ok');
     },
     hmClearMask(){ disp.clearMask(); },
     hmSmooth(){ disp.smoothMask(0.6, 2); },
@@ -3422,8 +3584,18 @@ function chainApp(){
     /* ---- step 3 actions ---- */
     recheck(){ regen(true); },
     pathReset(){ regeneratePathFromSliders(); },
-    scaleReset(){ if(scaleEditor)scaleEditor.setValue(DEFAULT_SCALE_CODE); else applyScaleCode(DEFAULT_SCALE_CODE); },
-    colorReset(){ if(colorEditor)colorEditor.setValue(DEFAULT_COLOR_CODE); else applyColorCode(DEFAULT_COLOR_CODE); },
+    scaleReset(){ this.scalePreset('same'); },
+    colorReset(){ this.colorPreset('alternate'); },
+    /* presets: the numbers worth tweaking sit at the END of the code, below the explanatory comments → scroll there */
+    scalePreset(k){
+      const c=SCALE_PRESETS[k]; if(!c) return;
+      if(scaleEditor){ scaleEditor.setValue(c); scaleEditor.revealLine(scaleEditor.getModel().getLineCount()); } else applyScaleCode(c);
+    },
+    colorPreset(k){
+      const c=COLOR_PRESETS[k]; if(!c) return;
+      setColorCode(c);
+      if(colorEditor) colorEditor.revealLine(colorEditor.getModel().getLineCount());
+    },
 
     /* ---- render-mode + camera ---- */
     toggleXray(){ this.xray=!this.xray; applyXray(); },
@@ -3452,9 +3624,24 @@ function chainApp(){
     },
     exportChain, saveCfg,
     chooseCfg(){ $('cfgInput').click(); },
-    onCfgInput(e){ if(e.target.files[0])loadCfg(e.target.files[0]); },
+    onCfgInput(e){ if(e.target.files[0]){ this.projOpen=false; loadCfg(e.target.files[0]); } e.target.value=''; },
 
     /* ---- projects ---- */
     refreshProjects, saveNewProject, updateCurrentProject, loadProject, deleteProject,
+    get shownProjects(){
+      const q=this.projFilter.trim().toLowerCase();
+      return q ? this.projects.filter(p=>(p.name||'').toLowerCase().includes(q)) : this.projects;
+    },
+    projMeta(p){ return (p.links ?? '–')+' links · '+new Date(p.updatedAt).toLocaleDateString(); },
+    openProjects(){ this.projOpen=true; this.projMsg=''; this.projFilter=''; refreshProjects(); },
+    saveProject(){ return this.projectId ? updateCurrentProject() : saveNewProject(); },
+    /* header Save: one click once the project has a name; the first time it asks for one */
+    quickSave(){
+      if(!S.baseGeo){ status('Nothing to save yet — load a part first.','warn'); return; }
+      if(this.projectId && hasServer) return updateCurrentProject();
+      this.openProjects();
+      setTimeout(()=>{ const el=this.$refs.projName; if(el) el.focus(); }, 60);   // x-show reveals the dialog a tick later
+    },
+    async openProject(id){ this.projOpen=false; await loadProject(id); },
   };
 }

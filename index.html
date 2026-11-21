@@ -4,660 +4,762 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Articulated Spiral Builder — print-in-place chain layout</title>
+<link rel="icon" href="data:," />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-<div id="app" x-data="chainApp" x-cloak>
+<div id="app" x-data="chainApp" x-cloak @keydown.escape.window="onEscape()">
   <!-- ============================ SIDE PANEL ============================ -->
   <aside id="panel">
-    <header>
-      <h1>Articulated Spiral Builder</h1>
-      <p>Print-in-place chain layout → single mesh file</p>
+    <header id="top">
+      <div class="brand">
+        <h1>Articulated Spiral Builder</h1>
+        <p x-show="!projectId">One link in → a print-in-place chain out</p>
+        <p x-show="projectId" class="projtitle" :title="projectTitle">Project: <b x-text="projectTitle"></b></p>
+      </div>
+      <div class="topbtns">
+        <button class="ghost sm" @click="openProjects()" title="Open, save or delete projects">Projects</button>
+        <button class="ghost sm" @click="quickSave()" :disabled="!hasPart" title="Save this project">Save</button>
+      </div>
     </header>
-    <div id="steps">
 
-      <!-- PROJECTS -->
-      <section class="step" id="proj"
-        :class="{ open: openId==='proj', active: activeId==='proj', done: steps.proj.done, locked: steps.proj.locked }">
-        <div class="head" @click="toggleStep('proj')"><span class="num">★</span> Projects</div>
-        <div class="body" x-show="openId==='proj'">
-          <div class="row"><input x-model="projectName" type="text" placeholder="project name…" style="flex:1;width:auto"></div>
-          <div class="btnrow">
-            <button class="tiny" @click="saveNewProject()">Save as new</button>
-            <button class="ghost tiny" @click="updateCurrentProject()">Update current</button>
-            <button class="ghost tiny" @click="refreshProjects()">↻</button>
-          </div>
-          <p class="hint" id="projMsg" x-text="projMsg" :style="projMsgErr?'color:var(--bad)':''"></p>
-          <div id="projList">
-            <p class="hint" x-show="!hasServer">Open the app via the Deno server (not file://) to manage projects.</p>
-            <p class="hint" x-show="hasServer && !projects.length">No saved projects yet.</p>
-            <template x-for="p in projects" :key="p.id">
-              <div class="projrow" :class="{ cur: p.id===projectId }">
-                <div class="projinfo"><b x-text="p.name"></b>
-                  <span class="projmeta" x-text="(p.links ?? '–')+' links · '+new Date(p.updatedAt).toLocaleString()"></span></div>
-                <div class="btnrow">
-                  <button class="ghost tiny" @click="loadProject(p.id)">Load</button>
-                  <button class="ghost tiny" @click="deleteProject(p.id)">✕</button>
-                </div>
-              </div>
+    <!-- the four main steps; the optional part tools are opened from the Part page -->
+    <nav id="stepper" aria-label="Steps">
+      <button type="button" class="stp" :class="stepState('s1')" :title="stepTitle('s1')" @click="goStep('s1')">
+        <span class="num" x-text="stepState('s1').done?'✓':'1'">1</span><span class="lbl">Part</span></button>
+      <button type="button" class="stp" :class="stepState('s2')" :title="stepTitle('s2')" @click="goStep('s2')">
+        <span class="num" x-text="stepState('s2').done?'✓':'2'">2</span><span class="lbl">Joints</span></button>
+      <button type="button" class="stp" :class="stepState('s3')" :title="stepTitle('s3')" @click="goStep('s3')">
+        <span class="num" x-text="stepState('s3').done?'✓':'3'">3</span><span class="lbl">Chain</span></button>
+      <button type="button" class="stp" :class="stepState('s4')" :title="stepTitle('s4')" @click="goStep('s4')">
+        <span class="num" x-text="stepState('s4').done?'✓':'4'">4</span><span class="lbl">Export</span></button>
+    </nav>
+
+    <div id="pages">
+
+      <!-- ============================ 1 · PART ============================ -->
+      <section class="page" id="s1" x-show="openId==='s1'">
+        <input id="fileInput" type="file" accept=".stl,.ply,.obj,.glb,.gltf" hidden @change="onFileInput($event)" />
+
+        <!-- nothing loaded yet -->
+        <div class="welcome" x-show="!hasPart">
+          <h2>Make a chain from one link</h2>
+          <p class="lead">Load the 3D model of a single link. The app repeats it along a line or a spiral so every link hooks into the next — and gives you one file that prints in place.</p>
+          <button class="big" @click="chooseFile()">Choose a 3D file…</button>
+          <p class="hint center">.stl · .obj · .ply · .glb · .gltf — or drop the file onto the view</p>
+
+          <div class="recent" x-show="hasServer && projects.length">
+            <h3>Or continue a project</h3>
+            <template x-for="p in projects.slice(0,4)" :key="p.id">
+              <button class="projopen" @click="openProject(p.id)">
+                <b x-text="p.name"></b><span class="projmeta" x-text="projMeta(p)"></span></button>
             </template>
+            <button class="link" x-show="projects.length>4" @click="openProjects()" x-text="'All '+projects.length+' projects…'"></button>
+          </div>
+
+          <ol class="how">
+            <li><b>Part</b> — load one link and lay it flat</li>
+            <li><b>Joints</b> — mark where its pin and hole are</li>
+            <li><b>Chain</b> — pick a shape and the number of links</li>
+            <li><b>Export</b> — download one printable file</li>
+          </ol>
+
+          <details class="fold">
+            <summary>File units</summary>
+            <div class="foldbody">
+              <p class="hint">STL files are read as millimetres. For the other formats, say how many mm one model unit is <i>before</i> you load the file (1 = already mm, 1000 = metres).</p>
+              <div class="row"><label>1 unit =</label><input x-model.number="unitScale" type="number" step="0.1" min="0.0001"><span class="unit">mm</span></div>
+            </div>
+          </details>
+        </div>
+
+        <!-- a part is loaded -->
+        <div x-show="hasPart">
+          <div class="pagehead">
+            <h2>Part</h2>
+            <button class="ghost sm" @click="chooseFile()">Replace file…</button>
+          </div>
+          <p class="lead">Turn the link so it lies flat on the plate, the way it will be printed.</p>
+          <p class="meta"><span x-show="partName && partName!=='part'"><b x-text="partName"></b> · </span><span id="dbgOut" x-html="dbgOut"></span></p>
+
+          <div class="card">
+            <h3>Lay it flat</h3>
+            <div class="btnrow">
+              <button class="ghost" :class="{ on: arm==='pickFace' }" @click="setArm('pickFace')"
+                x-text="arm==='pickFace' ? 'Now click a face…' : 'Pick the bottom face'">Pick the bottom face</button>
+              <button class="ghost" @click="autoAlign()" title="Line the part up with its own main axes">Auto-orient</button>
+            </div>
+            <div class="row"><label>Turn 90° around</label>
+              <div class="seg">
+                <button @click="nudge('x')">X</button>
+                <button @click="nudge('y')">Y</button>
+                <button @click="nudge('z')">Z</button>
+              </div></div>
+          </div>
+
+          <details class="fold">
+            <summary>Fine rotation</summary>
+            <div class="foldbody">
+              <div class="srow"><label>Around X (°)</label><input x-model.number="partX" type="range" min="-180" max="180" step="1"><input x-model.number="partX" type="number" step="1"></div>
+              <div class="srow"><label>Around Y (°)</label><input x-model.number="partY" type="range" min="-180" max="180" step="1"><input x-model.number="partY" type="number" step="1"></div>
+              <div class="srow"><label>Around Z (°)</label><input x-model.number="partZ" type="range" min="-180" max="180" step="1"><input x-model.number="partZ" type="number" step="1"></div>
+              <div class="btnrow">
+                <button class="ghost sm" @click="alignZ()" title="Rotate on the plate so the longest side runs along X">Long side along X</button>
+                <button class="ghost sm" @click="centerPart()">Centre part</button>
+              </div>
+            </div>
+          </details>
+
+          <details class="fold">
+            <summary>Flatten the bottom</summary>
+            <div class="foldbody">
+              <p class="hint">Rounded feet or a stray bump underneath? Slice everything below this height off, so the part really sits flat. The red plane shows the cut.</p>
+              <div class="srow"><label>Cut height (mm)</label><input x-model.number="cutHeight" type="range" min="0" :max="cutMax" step="0.1"><input x-model.number="cutHeight" type="number" step="0.1" min="0"></div>
+              <div class="btnrow">
+                <button class="sm" @click="cutFlatBottom()" :disabled="!(cutHeight>0)">Cut flat</button>
+                <button class="ghost sm" @click="undoCutFlat()" :disabled="!hasCutUndo">Undo cut</button>
+              </div>
+            </div>
+          </details>
+
+          <details class="fold">
+            <summary>Detail level <span class="sum" x-text="simSummary"></span></summary>
+            <div class="foldbody">
+              <p class="hint">A detailed part × many links makes a huge, slow file. The part is reduced once, before the chain is built.</p>
+              <div class="row">
+                <label class="check"><input type="checkbox" x-model="simAuto"> <span>Automatic — keep each link under</span></label>
+                <input x-model.number="simMaxVerts" type="number" min="50" step="250" :disabled="!simAuto"><span class="unit">vertices</span></div>
+              <div class="srow" x-show="!simAuto"><label>Reduce by (%)</label><input x-model.number="simPct" type="range" min="0" max="99" step="1"><input x-model.number="simPct" type="number" min="0" max="99" step="5"></div>
+              <p class="hint" id="simEst" x-html="simEst"></p>
+              <div class="btnrow">
+                <button class="ghost sm" @click="applySimplify()" :disabled="simApplyDisabled" x-show="!simAuto">Reduce now</button>
+                <button class="ghost sm" @click="restoreDetail()" :disabled="simResetDisabled">Restore full detail</button>
+              </div>
+            </div>
+          </details>
+
+          <details class="fold">
+            <summary>Symmetry &amp; mirroring <span class="sum" x-text="mirrorEnabled ? 'half part · mirrored' : (halfDetected ? 'half a part?' : '')"></span></summary>
+            <div class="foldbody">
+              <h4>Mirror lines</h4>
+              <p class="hint">Finds the part's left/right symmetry (<span class="swatch" style="background:#ff3df0"></span>magenta line). Sculpting uses it to mirror every stroke. Lay the part flat first.</p>
+              <div class="btnrow">
+                <button class="ghost sm" @click="detectSymmetry()">Find mirror lines</button>
+                <button class="ghost sm" @click="toggleSym()">Show / hide</button>
+              </div>
+              <p class="hint" id="symOut" x-html="symOut"></p>
+              <h4>Half a part</h4>
+              <p class="hint" x-html="mirrorDetectOut" x-show="mirrorDetectOut"></p>
+              <label class="check"><input type="checkbox" x-model="mirrorEnabled"> <span>My model is one half — mirror it into a full link</span></label>
+              <div x-show="mirrorEnabled">
+                <div class="row"><label>Mirror across</label>
+                  <div class="seg">
+                    <button :class="{on:mirrorAxis==='x'}" @click="mirrorAxis='x'">X</button>
+                    <button :class="{on:mirrorAxis==='y'}" @click="mirrorAxis='y'">Y</button>
+                    <button :class="{on:mirrorAxis==='z'}" @click="mirrorAxis='z'">Z</button>
+                  </div></div>
+                <div class="srow"><label>Plane position (mm)</label><input x-model.number="mirrorOffset" type="range" min="-500" max="500" step="0.1"><input x-model.number="mirrorOffset" type="number" step="0.1"></div>
+                <div class="btnrow"><button class="ghost sm" @click="mirrorSnap()">Snap to the cut face</button></div>
+                <p class="hint">The chain and the export use the full, mirrored link. Here you keep seeing the half, which is easier to edit.</p>
+              </div>
+            </div>
+          </details>
+
+          <details class="fold" x-show="partHasColor">
+            <summary>Colours <span class="sum" x-text="colorShades+(colorShades==1?' colour':' colours')"></span></summary>
+            <div class="foldbody">
+              <p class="hint">A multi-colour print needs a handful of flat colours — one per filament. This merges the model's shades down to that number.</p>
+              <div class="srow"><label>Number of colours</label><input x-model.number="colorShades" type="range" min="1" max="8" step="1"><span class="val" x-text="colorShades">2</span></div>
+              <label class="check"><input type="checkbox" x-model="purify"> <span>Snap to pure colours (e.g. pure white &amp; pure green)</span></label>
+            </div>
+          </details>
+
+          <details class="fold">
+            <summary>File units</summary>
+            <div class="foldbody">
+              <p class="hint">Part came in far too small or too big? STL is read as millimetres; for the other formats set how many mm one model unit is, then load the file again.</p>
+              <div class="row"><label>1 unit =</label><input x-model.number="unitScale" type="number" step="0.1" min="0.0001"><span class="unit">mm</span></div>
+            </div>
+          </details>
+
+          <h3 class="sect">Optional extras</h3>
+          <div class="tools">
+            <button class="tool" @click="openTool('sculpt')">
+              <span class="ico">✎</span><span class="tt"><b>Sculpt</b><small>Push, carve and smooth the surface with a brush</small></span></button>
+            <button class="tool" @click="openTool('height')">
+              <span class="ico">▲</span><span class="tt"><b>Relief from an image</b><small>Paint a picture onto the part as raised relief</small></span></button>
+            <button class="tool" @click="openTool('lsculpt')">
+              <span class="ico">↻</span><span class="tt"><b>Morph along the chain</b><small>Let the links change shape from first to last</small></span>
+              <span class="badge" x-show="lsNodes.length" x-text="lsNodes.length"></span></button>
+            <button class="tool" @click="openTool('deco')">
+              <span class="ico">✿</span><span class="tt"><b>Add an object</b><small>Fuse a second model — a duck, a chilli — onto every link</small></span>
+              <span class="badge" x-show="decoLoaded">✓</span></button>
           </div>
         </div>
       </section>
 
-      <!-- STEP 1 -->
-      <section class="step" id="s1"
-        :class="{ open: openId==='s1', active: activeId==='s1', done: steps.s1.done, locked: steps.s1.locked }">
-        <div class="head" @click="toggleStep('s1')"><span class="num">1</span> Upload &amp; align</div>
-        <div class="body" x-show="openId==='s1'">
-          <div class="btnrow">
-            <button class="ghost" @click="chooseFile()">Choose file…</button>
-            <input id="fileInput" type="file" accept=".stl,.ply,.obj,.glb,.gltf" hidden @change="onFileInput($event)" />
-          </div>
-          <p class="hint">Drag a <b>.stl</b> / <b>.ply</b> / <b>.obj</b> / <b>.glb</b> / <b>.gltf</b> onto the viewport. STL = millimetres.</p>
-          <div class="row"><label>glTF unit scale → mm</label>
-            <input x-model.number="unitScale" type="number" step="0.1" min="0.0001"></div>
-          <div class="row col" style="margin-top:8px">
-            <div class="row" style="margin:0"><label>Color shades</label><span class="rnglbl" style="width:auto" x-text="colorShades">2</span></div>
-            <input x-model.number="colorShades" type="range" min="1" max="8" step="1">
-            <label class="row" style="margin:4px 0 0;gap:6px;cursor:pointer"><input type="checkbox" x-model="purify" style="width:auto"> <span>Pure colours (snap each shade to 0/1 — e.g. pure white &amp; pure green)</span></label>
-            <p class="hint" style="margin:4px 0 0">Collapses a colored model's vertex colors to this many shades. Only affects colored meshes.</p>
-          </div>
-          <div class="grp">
-            <h4>Orient</h4>
-            <div class="btnrow">
-              <button class="ghost tiny" @click="autoAlign()">Auto-align (PCA)</button>
-              <button class="ghost tiny" @click="nudge('x')">Rot X 90°</button>
-              <button class="ghost tiny" @click="nudge('y')">Rot Y 90°</button>
-              <button class="ghost tiny" @click="nudge('z')">Rot Z 90°</button>
-              <button class="ghost tiny" @click="centerPart()">Center part</button>
-            </div>
-            <p class="hint">Then click a triangle to pick the face to rest on the plate:</p>
-            <div class="btnrow">
-              <button class="ghost tiny" @click="setArm('pickFace')">Pick face to lay flat <span class="pill armed" x-show="arm==='pickFace'">click…</span></button>
-              <button class="tiny" @click="layFlat()">Lay flat on picked face</button>
-              <button class="ghost tiny" @click="alignZ()">Auto-rotate</button>
-            </div>
-            <div class="row col" style="margin-top:8px">
-              <div class="row" style="margin:0"><label>Rotation X (°)</label><input x-model.number="partX" type="number" step="1"></div>
-              <input x-model.number="partX" type="range" min="-180" max="180" step="1">
-            </div>
-            <div class="row col" style="margin-top:4px">
-              <div class="row" style="margin:0"><label>Rotation Y (°)</label><input x-model.number="partY" type="number" step="1"></div>
-              <input x-model.number="partY" type="range" min="-180" max="180" step="1">
-            </div>
-            <div class="row col" style="margin-top:4px">
-              <div class="row" style="margin:0"><label>Rotation Z (°)</label><input x-model.number="partZ" type="number" step="1"></div>
-              <input x-model.number="partZ" type="range" min="-180" max="180" step="1">
-            </div>
-          </div>
-          <div class="grp">
-            <h4>Flatten bottom</h4>
-            <p class="hint">If the rested face is uneven (rounded feet, a stray bump, …) slice it off so the part actually sits flat on the plate. Cuts everything below the chosen height and caps the new bottom face.</p>
-            <div class="row col">
-              <div class="row" style="margin:0"><label>Cut height (mm)</label><input x-model.number="cutHeight" type="number" step="0.1"></div>
-              <input x-model.number="cutHeight" type="range" min="-200" max="200" step="0.1">
-            </div>
-            <div class="btnrow">
-              <button class="ghost tiny" :class="{ on: cutPreview }" @click="toggleCutPreview()">Preview plane</button>
-              <button class="tiny" @click="cutFlatBottom()" :disabled="!cutHeight">Cut flat</button>
-              <button class="ghost tiny" @click="undoCutFlat()" :disabled="!hasCutUndo">Undo cut</button>
-            </div>
-          </div>
-          <div class="grp">
-            <h4>Symmetry</h4>
-            <div class="btnrow">
-              <button class="ghost tiny" @click="detectSymmetry()">Find mirror lines</button>
-              <button class="ghost tiny" @click="toggleSym()">Show / hide</button>
-            </div>
-            <p class="hint">Detects the part's vertical mirror planes (<span class="swatch" style="background:#ff3df0"></span>magenta lines). Lay flat first for best results — lines follow every rotation.</p>
-            <p class="hint" id="symOut" x-html="symOut"></p>
-          </div>
-          <div class="grp">
-            <h4>Simplify model</h4>
-            <p class="hint">Reduce the part <i>now</i>, before building the chain — a heavy part × many links can exhaust memory. The cap is per link; the estimate shows the whole chain.</p>
-            <div class="row" style="margin:6px 0"><label style="flex:1"><input type="checkbox" x-model="simAuto" style="width:auto;vertical-align:middle;margin-right:5px">Auto-simplify to ≤</label><input x-model.number="simMaxVerts" type="number" min="50" step="250"><span class="rnglbl" style="width:auto">verts/link</span></div>
-            <div class="row col"><div class="row" style="margin:0"><label>Reduction</label><input x-model.number="simPct" type="number" min="0" max="99" step="5" :disabled="simAuto"><span class="rnglbl" style="width:auto">%</span></div>
-              <input x-model.number="simPct" type="range" min="0" max="99" step="1" :disabled="simAuto"></div>
-            <p class="hint" id="simEst" x-html="simEst"></p>
-            <div class="btnrow">
-              <button class="ghost tiny" @click="applySimplify()" :disabled="simApplyDisabled">Apply now</button>
-              <button class="ghost tiny" @click="restoreDetail()" :disabled="simResetDisabled">Restore full detail</button>
-            </div>
-          </div>
-          <div class="grp">
-            <h4>Inspect geometry (debug)</h4>
-            <p class="hint">Toggle <b>Vertices</b> / <b>Wireframe</b> from the top-right corner — available in every step.</p>
-            <p class="hint" id="dbgOut" x-html="dbgOut">Load a part to see its vertex / triangle count.</p>
-          </div>
-          <div class="grp">
-            <h4>Mirror half</h4>
-            <p class="hint" x-html="mirrorDetectOut" x-show="mirrorDetectOut"></p>
-            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="mirrorEnabled" style="width:auto"> <span>Mirror part before building chain</span></label>
-            <div x-show="mirrorEnabled" style="margin-top:8px">
-              <div class="row"><label>Cut axis</label>
-                <div class="btnrow">
-                  <button class="ghost tiny" :class="{on:mirrorAxis==='x'}" @click="mirrorAxis='x'">X</button>
-                  <button class="ghost tiny" :class="{on:mirrorAxis==='y'}" @click="mirrorAxis='y'">Y</button>
-                  <button class="ghost tiny" :class="{on:mirrorAxis==='z'}" @click="mirrorAxis='z'">Z</button>
-                </div>
-              </div>
-              <div class="row col" style="margin-top:6px">
-                <div class="row" style="margin:0"><label>Plane offset (mm)</label><input x-model.number="mirrorOffset" type="number" step="0.1"></div>
-                <input x-model.number="mirrorOffset" type="range" min="-500" max="500" step="0.1">
-              </div>
-              <div class="btnrow" style="margin-top:4px">
-                <button class="ghost tiny" @click="mirrorSnap()">Snap to bounding box</button>
-              </div>
-              <p class="hint">The chain and export will use the full symmetric part. Loop sculpt deformation is applied symmetrically to both halves. The part shown here stays as the half for easier editing.</p>
-            </div>
-          </div>
-          <div class="row" style="margin-top:10px"><button @click="s1Next()" :disabled="s1nextDisabled">Confirm orientation →</button></div>
-        </div>
-      </section>
+      <!-- ============================ TOOL · SCULPT ============================ -->
+      <section class="page" id="sculpt" x-show="openId==='sculpt'">
+        <div class="pagehead"><h2><span class="crumb" @click="closeTool()">Part ›</span> Sculpt</h2></div>
+        <p class="lead"><b>Drag</b> on the part to sculpt. Hold <kbd>Alt</kbd> and drag to rotate the view.</p>
 
-      <!-- SCULPT (optional) -->
-      <section class="step" id="sculpt"
-        :class="{ open: openId==='sculpt', active: activeId==='sculpt', done: steps.sculpt.done, locked: steps.sculpt.locked }">
-        <div class="head" @click="toggleStep('sculpt')"><span class="num">✎</span> Sculpt (optional)</div>
-        <div class="body" x-show="openId==='sculpt'">
-          <p class="hint">Left-drag to sculpt. <b>Alt+drag</b> orbits, right-drag pans — without leaving sculpt mode.</p>
-          <div class="grp">
-            <h4>Brush</h4>
-            <div class="btnrow">
-              <button class="ghost tiny" :class="{ on: sculptTool==='draw' }"   @click="setSculptTool('draw')">Draw</button>
-              <button class="ghost tiny" :class="{ on: sculptTool==='carve' }"  @click="setSculptTool('carve')">Carve</button>
-              <button class="ghost tiny" :class="{ on: sculptTool==='smooth' }" @click="setSculptTool('smooth')">Smooth</button>
-            </div>
-            <div class="row col"><div class="row" style="margin:0"><label>Radius (mm)</label><input x-model.number="sculptRadius" type="number" step="0.5" min="0.2"></div>
-              <input x-model.number="sculptRadius" type="range" min="0.5" max="60" step="0.5"></div>
-            <div class="row col"><div class="row" style="margin:0"><label>Strength</label><input x-model.number="sculptStrength" type="number" step="0.05" min="0" max="1"></div>
-              <input x-model.number="sculptStrength" type="range" min="0" max="1" step="0.01"></div>
-          </div>
-          <div class="grp">
-            <h4>Mirror symmetry</h4>
-            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="sculptMirror" style="width:auto"> <span>Mirror every stroke</span></label>
-            <label class="row" style="gap:6px;cursor:pointer;margin-top:4px"><input type="checkbox" x-model="sculptManual" style="width:auto"> <span>Override detected plane</span></label>
+        <div class="row"><label>Brush</label>
+          <div class="seg">
+            <button :class="{ on: sculptTool==='draw' }"   @click="setSculptTool('draw')">Draw</button>
+            <button :class="{ on: sculptTool==='carve' }"  @click="setSculptTool('carve')">Carve</button>
+            <button :class="{ on: sculptTool==='smooth' }" @click="setSculptTool('smooth')">Smooth</button>
+          </div></div>
+        <div class="srow"><label>Size (mm)</label><input x-model.number="sculptRadius" type="range" min="0.5" :max="brushMax" step="0.5"><input x-model.number="sculptRadius" type="number" step="0.5" min="0.2"></div>
+        <div class="srow"><label>Strength</label><input x-model.number="sculptStrength" type="range" min="0" max="1" step="0.01"><input x-model.number="sculptStrength" type="number" step="0.05" min="0" max="1"></div>
+        <label class="check"><input type="checkbox" x-model="sculptMirror"> <span>Mirror every stroke to the other side</span></label>
+        <div class="btnrow undo">
+          <button class="ghost sm" :disabled="!canUndo" @click="undo()" title="Ctrl+Z">↶ Undo</button>
+          <button class="ghost sm" :disabled="!canRedo" @click="redo()" title="Ctrl+Shift+Z">↷ Redo</button>
+        </div>
+
+        <details class="fold">
+          <summary>Mirror plane</summary>
+          <div class="foldbody">
+            <p class="hint">Strokes are mirrored across the magenta line from <b>Part → Symmetry &amp; mirroring → Find mirror lines</b>. No line found, or the wrong one? Set the plane by hand.</p>
+            <label class="check"><input type="checkbox" x-model="sculptManual"> <span>Set the mirror plane by hand</span></label>
             <template x-if="sculptManual">
               <div>
-                <div class="btnrow">
-                  <button class="ghost tiny" :class="{ on: sculptAxis==='x' }" @click="sculptAxis='x'">X</button>
-                  <button class="ghost tiny" :class="{ on: sculptAxis==='y' }" @click="sculptAxis='y'">Y</button>
-                  <button class="ghost tiny" :class="{ on: sculptAxis==='z' }" @click="sculptAxis='z'">Z</button>
-                </div>
-                <div class="row"><label>Plane offset (mm)</label><input x-model.number="sculptOffset" type="number" step="0.5"></div>
+                <div class="row"><label>Mirror across</label>
+                  <div class="seg">
+                    <button :class="{ on: sculptAxis==='x' }" @click="sculptAxis='x'">X</button>
+                    <button :class="{ on: sculptAxis==='y' }" @click="sculptAxis='y'">Y</button>
+                    <button :class="{ on: sculptAxis==='z' }" @click="sculptAxis='z'">Z</button>
+                  </div></div>
+                <div class="row"><label>Plane position (mm)</label><input x-model.number="sculptOffset" type="number" step="0.5"></div>
               </div>
             </template>
-            <p class="hint">Defaults to the magenta plane from “Find mirror lines” (Step 1). Tick override to set an axis + offset by hand.</p>
           </div>
-          <div class="grp">
-            <h4>History</h4>
-            <div class="btnrow">
-              <button class="ghost tiny" :disabled="!canUndo" @click="undo()">↶ Undo</button>
-              <button class="ghost tiny" :disabled="!canRedo" @click="redo()">↷ Redo</button>
-            </div>
-            <p class="hint">One step per stroke. <b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b>. Resets when you switch modes or change topology.</p>
+        </details>
+        <details class="fold">
+          <summary>Repair mesh</summary>
+          <div class="foldbody">
+            <p class="hint">Brush behaving oddly on an imported model? This welds duplicate vertices, drops zero-size triangles and recomputes the shading.</p>
+            <div class="btnrow"><button class="ghost sm" @click="sculptRepair()">Repair mesh</button></div>
           </div>
-          <div class="grp">
-            <h4>Repair</h4>
-            <div class="btnrow"><button class="ghost tiny" @click="sculptRepair()">Repair mesh</button></div>
-            <p class="hint">Welds duplicates, drops zero-area triangles, recomputes normals. (Voxel remesh: see <code>sculpt/Voxelizer.js</code> notes.)</p>
-          </div>
-        </div>
+        </details>
       </section>
 
-      <!-- HEIGHTMAP DISPLACEMENT (optional) -->
-      <section class="step" id="height"
-        :class="{ open: openId==='height', active: activeId==='height', done: steps.height.done, locked: steps.height.locked }">
-        <div class="head" @click="toggleStep('height')"><span class="num">⛰</span> Heightmap paint (optional)</div>
-        <div class="body" x-show="openId==='height'">
-          <p class="hint">Load a greyscale image, then <b>left-drag</b> to paint relief where you want it. <b>Alt+drag</b> orbits, right-drag pans.</p>
+      <!-- ============================ TOOL · RELIEF FROM IMAGE ============================ -->
+      <section class="page" id="height" x-show="openId==='height'">
+        <div class="pagehead"><h2><span class="crumb" @click="closeTool()">Part ›</span> Relief from an image</h2></div>
+        <p class="lead">Load a greyscale picture (white = high, black = low), then <b>drag</b> on the part to paint it on where you want the relief. Hold <kbd>Alt</kbd> and drag to rotate the view.</p>
 
-          <div class="grp">
-            <h4>Image</h4>
-            <div class="btnrow"><button class="ghost tiny" @click="$refs.hmFile.click()">Load image…</button></div>
-            <input x-ref="hmFile" type="file" accept="image/*" style="display:none" @change="hmLoadFile($event)">
-            <canvas id="hmPreview" x-show="hmLoaded" style="width:100%;image-rendering:pixelated;border:1px solid #333;margin-top:6px"></canvas>
+        <div class="btnrow">
+          <button :class="{ ghost: hmLoaded }" @click="$refs.hmFile.click()" x-text="hmLoaded ? 'Change image…' : 'Load image…'">Load image…</button>
+        </div>
+        <input x-ref="hmFile" type="file" accept="image/*" hidden @change="hmLoadFile($event)">
+        <canvas id="hmPreview" x-show="hmLoaded"></canvas>
+
+        <div class="srow"><label>Depth (mm)</label><input x-model.number="hmStrength" type="range" min="0" max="30" step="0.1"><input x-model.number="hmStrength" type="number" step="0.1"></div>
+        <div class="srow"><label>Brush size (mm)</label><input x-model.number="hmRadius" type="range" min="0.5" :max="brushMax" step="0.5"><input x-model.number="hmRadius" type="number" step="0.5" min="0.2"></div>
+        <div class="srow"><label>Brush flow</label><input x-model.number="hmFlow" type="range" min="0" max="1" step="0.01"><input x-model.number="hmFlow" type="number" step="0.05" min="0" max="1"></div>
+        <label class="check"><input type="checkbox" x-model="hmErase"> <span>Eraser — remove relief instead of adding it</span></label>
+        <div class="btnrow undo">
+          <button class="ghost sm" :disabled="!canUndo" @click="undo()" title="Ctrl+Z">↶ Undo</button>
+          <button class="ghost sm" :disabled="!canRedo" @click="redo()" title="Ctrl+Shift+Z">↷ Redo</button>
+          <button class="ghost sm" @click="hmSmooth()" title="Soften the edge of the painted area">Soften edges</button>
+          <button class="ghost sm" @click="hmClearMask()">Clear all</button>
+        </div>
+
+        <details class="fold" x-show="hmLoaded">
+          <summary>Adjust the image</summary>
+          <div class="foldbody">
+            <div class="srow"><label>Black point</label><input x-model.number="hmBlack" type="range" min="0" max="1" step="0.01"><input x-model.number="hmBlack" type="number" step="0.01" min="0" max="1"></div>
+            <div class="srow"><label>White point</label><input x-model.number="hmWhite" type="range" min="0" max="1" step="0.01"><input x-model.number="hmWhite" type="number" step="0.01" min="0" max="1"></div>
+            <div class="srow"><label>Brightness</label><input x-model.number="hmBright" type="range" min="-1" max="1" step="0.01"><input x-model.number="hmBright" type="number" step="0.02"></div>
+            <div class="srow"><label>Contrast</label><input x-model.number="hmContrast" type="range" min="0" max="2" step="0.01"><input x-model.number="hmContrast" type="number" step="0.05"></div>
+            <div class="srow"><label>Shadows</label><input x-model.number="hmShadows" type="range" min="-1" max="1" step="0.01"><input x-model.number="hmShadows" type="number" step="0.02"></div>
+            <div class="srow"><label>Highlights</label><input x-model.number="hmHi" type="range" min="-1" max="1" step="0.01"><input x-model.number="hmHi" type="number" step="0.02"></div>
+            <label class="check"><input type="checkbox" x-model="hmInvert"> <span>Invert (black = high)</span></label>
           </div>
-
-          <div class="grp" x-show="hmLoaded">
-            <h4>Adjust</h4>
-            <div class="row col"><div class="row" style="margin:0"><label>Black point</label><input x-model.number="hmBlack" type="number" step="0.01" min="0" max="1"></div>
-              <input x-model.number="hmBlack" type="range" min="0" max="1" step="0.01"></div>
-            <div class="row col"><div class="row" style="margin:0"><label>White point</label><input x-model.number="hmWhite" type="number" step="0.01" min="0" max="1"></div>
-              <input x-model.number="hmWhite" type="range" min="0" max="1" step="0.01"></div>
-            <div class="row col"><div class="row" style="margin:0"><label>Lights</label><input x-model.number="hmBright" type="number" step="0.02"></div>
-              <input x-model.number="hmBright" type="range" min="-1" max="1" step="0.01"></div>
-            <div class="row col"><div class="row" style="margin:0"><label>Contrast</label><input x-model.number="hmContrast" type="number" step="0.05"></div>
-              <input x-model.number="hmContrast" type="range" min="0" max="2" step="0.01"></div>
-            <div class="row col"><div class="row" style="margin:0"><label>Shadows</label><input x-model.number="hmShadows" type="number" step="0.02"></div>
-              <input x-model.number="hmShadows" type="range" min="-1" max="1" step="0.01"></div>
-            <div class="row col"><div class="row" style="margin:0"><label>Highlights</label><input x-model.number="hmHi" type="number" step="0.02"></div>
-              <input x-model.number="hmHi" type="range" min="-1" max="1" step="0.01"></div>
-            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="hmInvert" style="width:auto"> <span>Invert</span></label>
-          </div>
-
-          <div class="grp">
-            <h4>Displacement</h4>
-            <div class="row col"><div class="row" style="margin:0"><label>Strength (mm)</label><input x-model.number="hmStrength" type="number" step="0.1"></div>
-              <input x-model.number="hmStrength" type="range" min="0" max="30" step="0.1"></div>
-            <div class="row" style="margin-top:6px"><label>Direction</label>
-              <div class="btnrow">
-                <button class="ghost tiny" :class="{ on: hmDir==='normal' }" @click="hmDir='normal'">Normal</button>
-                <button class="ghost tiny" :class="{ on: hmDir==='axis' }"   @click="hmDir='axis'">Axis</button>
+        </details>
+        <details class="fold">
+          <summary>How the image is projected</summary>
+          <div class="foldbody">
+            <div class="row"><label>Raise the surface</label>
+              <div class="seg">
+                <button :class="{ on: hmDir==='normal' }" @click="hmDir='normal'" title="Outwards, at right angles to the surface">Outwards</button>
+                <button :class="{ on: hmDir==='axis' }"   @click="hmDir='axis'" title="Straight along the axis below">Along axis</button>
               </div></div>
-            <div class="row" style="margin-top:6px"><label>Mapping</label>
-              <div class="btnrow">
-                <button class="ghost tiny" :class="{ on: hmMode==='planar' }" @click="hmMode='planar'">Planar</button>
-                <button class="ghost tiny" :class="{ on: hmMode==='uv' }"     @click="hmMode='uv'">UV</button>
-                <button class="ghost tiny" :class="{ on: hmMode==='camera' }" @click="hmMode='camera'">View</button>
+            <div class="row"><label>Lay the image on</label>
+              <div class="seg">
+                <button :class="{ on: hmMode==='planar' }" @click="hmMode='planar'" title="Projected flat along the axis below">Flat</button>
+                <button :class="{ on: hmMode==='uv' }"     @click="hmMode='uv'" title="Uses the model's own texture coordinates">UV</button>
+                <button :class="{ on: hmMode==='camera' }" @click="hmMode='camera'" title="Projected from where you are looking">From view</button>
               </div></div>
             <div class="row" x-show="hmMode!=='uv'"><label>Axis</label>
-              <div class="btnrow">
-                <button class="ghost tiny" :class="{ on: hmAxis==='x' }" @click="hmAxis='x'">X</button>
-                <button class="ghost tiny" :class="{ on: hmAxis==='y' }" @click="hmAxis='y'">Y</button>
-                <button class="ghost tiny" :class="{ on: hmAxis==='z' }" @click="hmAxis='z'">Z</button>
+              <div class="seg">
+                <button :class="{ on: hmAxis==='x' }" @click="hmAxis='x'">X</button>
+                <button :class="{ on: hmAxis==='y' }" @click="hmAxis='y'">Y</button>
+                <button :class="{ on: hmAxis==='z' }" @click="hmAxis='z'">Z</button>
               </div></div>
           </div>
+        </details>
+      </section>
 
-          <div class="grp">
-            <h4>Brush</h4>
-            <div class="row col"><div class="row" style="margin:0"><label>Radius (mm)</label><input x-model.number="hmRadius" type="number" step="0.5" min="0.2"></div>
-              <input x-model.number="hmRadius" type="range" min="0.5" max="60" step="0.5"></div>
-            <div class="row col"><div class="row" style="margin:0"><label>Flow</label><input x-model.number="hmFlow" type="number" step="0.05" min="0" max="1"></div>
-              <input x-model.number="hmFlow" type="range" min="0" max="1" step="0.01"></div>
-            <label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" x-model="hmErase" style="width:auto"> <span>Erase (subtract from mask)</span></label>
-            <div class="btnrow" style="margin-top:6px">
-              <button class="ghost tiny" @click="hmSmooth()">Smooth mask</button>
-              <button class="ghost tiny" @click="hmClearMask()">Clear mask</button>
-            </div>
-          </div>
+      <!-- ============================ TOOL · MORPH ALONG THE CHAIN ============================ -->
+      <section class="page" id="lsculpt" x-show="openId==='lsculpt'">
+        <div class="pagehead"><h2><span class="crumb" @click="closeTool()">Part ›</span> Morph along the chain</h2></div>
+        <p class="lead">Make the links change shape gradually: the first link stays as it is, the last one shows the full effect. Add a point on the part and say how it should push, inflate or pinch.</p>
 
-          <div class="grp">
-            <h4>History</h4>
-            <div class="btnrow">
-              <button class="ghost tiny" :disabled="!canUndo" @click="undo()">↶ Undo</button>
-              <button class="ghost tiny" :disabled="!canRedo" @click="redo()">↷ Redo</button>
+        <div class="btnrow">
+          <button :class="{ on: arm==='lsPick', ghost: lsNodes.length }" @click="lsPickMode()" x-text="arm==='lsPick' ? 'Now click the part…' : '+ Add a point'">+ Add a point</button>
+          <button class="ghost" @click="lsClear()" x-show="lsNodes.length">Remove all</button>
+        </div>
+        <div class="list" x-show="lsNodes.length">
+          <template x-for="n in lsNodes" :key="n.idx">
+            <div class="listrow" :class="{ cur: lsActiveNode===n.idx }" @click="lsSelectNode(n.idx)">
+              <span x-text="n.label"></span>
+              <button class="ghost sm" @click.stop="lsDeleteNode(n.idx)" title="Remove this point">✕</button>
             </div>
-            <p class="hint">One step per stroke. <b>Ctrl+Z</b> / <b>Ctrl+Shift+Z</b>. Resets when you switch modes or change topology.</p>
-          </div>
+          </template>
+        </div>
+
+        <div class="card" x-show="lsActiveNode >= 0">
+          <h3>Selected point</h3>
+          <div class="row"><label>Effect</label>
+            <div class="seg">
+              <button :class="{ on: lsMode==='push' }"    @click="lsMode='push'">Push</button>
+              <button :class="{ on: lsMode==='inflate' }" @click="lsMode='inflate'">Inflate</button>
+              <button :class="{ on: lsMode==='pinch' }"   @click="lsMode='pinch'">Pinch</button>
+            </div></div>
+          <p class="hint" x-show="lsMode==='push'">Moves the surface along the arrow.</p>
+          <p class="hint" x-show="lsMode==='inflate'">Swells the surface outwards (negative amount: hollows it).</p>
+          <p class="hint" x-show="lsMode==='pinch'">Pulls the surface towards the point.</p>
+          <div class="srow"><label>Amount (mm)</label><input x-model.number="lsIntensity" type="range" :min="-amountMax" :max="amountMax" step="0.5"><input x-model.number="lsIntensity" type="number" step="0.5" min="-200" max="200"></div>
+          <div class="srow"><label>Reach (mm)</label><input x-model.number="lsRadius" type="range" min="1" :max="reachMax" step="1"><input x-model.number="lsRadius" type="number" step="1" min="0.5"></div>
+          <div class="row"><label>Handle in the view</label>
+            <div class="seg">
+              <button :class="{ on: lsGizmoMode==='translate' }" @click="lsSetGizmoMode('translate')" title="Drag the handle to move the point">Moves</button>
+              <button :class="{ on: lsGizmoMode==='rotate' }"    @click="lsSetGizmoMode('rotate')" title="Drag the handle to turn the arrow">Turns</button>
+            </div></div>
+
+          <details class="fold inner">
+            <summary>How it builds up along the chain</summary>
+            <div class="foldbody">
+              <div class="btnrow">
+                <button class="ghost sm" @click="lsPreset('return n_it_nor;')">Steady</button>
+                <button class="ghost sm" @click="lsPreset('return n_it_nor * n_it_nor;')">Late</button>
+                <button class="ghost sm" @click="lsPreset('return 1 - (1-n_it_nor)*(1-n_it_nor);')">Early</button>
+                <button class="ghost sm" @click="lsPreset('return Math.sin(n_it_nor * Math.PI);')">Middle only</button>
+                <button class="ghost sm" @click="lsPreset('return Math.abs(Math.sin(n_it_nor * Math.PI * 2));')">2 bumps</button>
+                <button class="ghost sm" @click="lsPreset('return Math.abs(Math.sin(n_it_nor * Math.PI * 4));')">4 bumps</button>
+                <button class="ghost sm" @click="lsPreset('return Math.sin(n_it_nor * Math.PI * 2);')">In / out</button>
+                <button class="ghost sm" @click="lsPreset('return Math.sin(n_it_nor * Math.PI * 4);')">In / out ×2</button>
+              </div>
+              <p class="hint">Or write it yourself: return a multiplier for the amount. <code>n_it_nor</code> runs from 0 (first link) to 1 (last link), <code>n_it</code> is the link number.</p>
+              <textarea class="code" x-model="lsCode" rows="3" spellcheck="false"></textarea>
+              <div class="btnrow"><button class="ghost sm" @click="lsApplyCode()">Apply formula</button></div>
+            </div>
+          </details>
+          <details class="fold inner">
+            <summary>Edge softness</summary>
+            <div class="foldbody">
+              <div class="seg wrap">
+                <button :class="{ on: lsFalloff==='smooth' }"   @click="lsFalloff='smooth'">Smooth</button>
+                <button :class="{ on: lsFalloff==='cosine' }"   @click="lsFalloff='cosine'">Cosine</button>
+                <button :class="{ on: lsFalloff==='gaussian' }" @click="lsFalloff='gaussian'">Gaussian</button>
+                <button :class="{ on: lsFalloff==='linear' }"   @click="lsFalloff='linear'">Linear</button>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="card" x-show="lsNodes.length">
+          <h3>Preview a link</h3>
+          <div class="srow"><label>First ↔ last link</label><input x-model.number="lsPreviewT" type="range" min="0" max="1" step="0.01"><input x-model.number="lsPreviewT" type="number" step="0.05" min="0" max="1"></div>
+          <p class="hint">Shows what one link looks like at that position in the chain. Only a preview — the part itself isn't changed.</p>
         </div>
       </section>
 
-      <!-- LOOP SCULPT (optional) -->
-      <section class="step" id="lsculpt"
-        :class="{ open: openId==='lsculpt', active: activeId==='lsculpt', done: steps.lsculpt.done, locked: steps.lsculpt.locked }">
-        <div class="head" @click="toggleStep('lsculpt')"><span class="num">↻</span> Loop sculpting (optional)</div>
-        <div class="body" x-show="openId==='lsculpt'">
-          <p class="hint">Place one or more sculpt nodes on the part. Each node defines a point on the surface, a push direction, and a falloff zone. During chain export each link is deformed by its <b>n_it_nor</b> value (0 → 1) — so early links are barely deformed while later ones show the full effect, creating a living progression across the chain.</p>
+      <!-- ============================ TOOL · ADD AN OBJECT ============================ -->
+      <section class="page" id="deco" x-show="openId==='deco'">
+        <div class="pagehead"><h2><span class="crumb" @click="closeTool()">Part ›</span> Add an object</h2></div>
+        <p class="lead">Sit a second model on every link — a duck, a chilli, … It is fused into the link as one coloured solid, so the whole chain comes out multi-colour.</p>
 
-          <div class="grp">
-            <h4>Nodes</h4>
-            <div class="btnrow">
-              <button class="ghost tiny" @click="lsPickMode()">Add node <span class="pill armed" x-show="arm==='lsPick'">click mesh…</span></button>
-              <button class="ghost tiny" @click="lsClear()" :disabled="!lsNodes.length">Clear all</button>
-            </div>
-            <template x-for="n in lsNodes" :key="n.idx">
-              <div class="projrow" :class="{ cur: lsActiveNode===n.idx }" @click="lsSelectNode(n.idx)" style="cursor:pointer">
-                <span class="projmeta" x-text="n.label" style="flex:1"></span>
-                <button class="ghost tiny" @click.stop="lsDeleteNode(n.idx)" style="padding:1px 6px">✕</button>
-              </div>
-            </template>
-            <p class="hint" x-show="!lsNodes.length">Click "Add node", then click a point on the part. A direction arrow appears — drag the gizmo to rotate it.</p>
-          </div>
-
-          <div class="grp" x-show="lsActiveNode >= 0">
-            <h4>Node parameters</h4>
-            <div class="row" style="margin-bottom:6px"><label>Gizmo</label>
-              <div class="btnrow">
-                <button class="ghost tiny" :class="{ on: lsGizmoMode==='translate' }" @click="lsSetGizmoMode('translate')">Move</button>
-                <button class="ghost tiny" :class="{ on: lsGizmoMode==='rotate' }"    @click="lsSetGizmoMode('rotate')">Rotate</button>
-              </div>
-            </div>
-            <div class="row col">
-              <div class="row" style="margin:0"><label>Intensity (mm)</label><input x-model.number="lsIntensity" type="number" step="0.5" min="-200" max="200"></div>
-              <input x-model.number="lsIntensity" type="range" min="-50" max="50" step="0.5">
-            </div>
-            <div class="row col">
-              <div class="row" style="margin:0"><label>Radius (mm)</label><input x-model.number="lsRadius" type="number" step="1" min="0.5"></div>
-              <input x-model.number="lsRadius" type="range" min="1" max="200" step="1">
-            </div>
-            <div class="row" style="margin-top:6px"><label>Mode</label>
-              <div class="btnrow">
-                <button class="ghost tiny" :class="{ on: lsMode==='push' }"    @click="lsMode='push'">Push</button>
-                <button class="ghost tiny" :class="{ on: lsMode==='inflate' }" @click="lsMode='inflate'">Inflate</button>
-                <button class="ghost tiny" :class="{ on: lsMode==='pinch' }"   @click="lsMode='pinch'">Pinch</button>
-              </div>
-            </div>
-            <p class="hint" x-show="lsMode==='push'">Vertices inside the zone are moved along the arrow direction.</p>
-            <p class="hint" x-show="lsMode==='inflate'">Vertices are pushed along their own normals — creates a bulge or hollow.</p>
-            <p class="hint" x-show="lsMode==='pinch'">Vertices are pulled toward the node's centre point.</p>
-            <div class="row" style="margin-top:6px"><label>Falloff</label>
-              <div class="btnrow">
-                <button class="ghost tiny" :class="{ on: lsFalloff==='smooth' }"   @click="lsFalloff='smooth'">Smooth</button>
-                <button class="ghost tiny" :class="{ on: lsFalloff==='cosine' }"   @click="lsFalloff='cosine'">Cosine</button>
-                <button class="ghost tiny" :class="{ on: lsFalloff==='gaussian' }" @click="lsFalloff='gaussian'">Gaussian</button>
-                <button class="ghost tiny" :class="{ on: lsFalloff==='linear' }"   @click="lsFalloff='linear'">Linear</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="grp">
-            <h4>Intensity formula</h4>
-            <p class="hint">Returns a multiplier applied to every node's intensity. <code>n_it_nor</code> is 0 on the first link, 1 on the last. Can return negative values to flip direction.</p>
-            <div class="btnrow" style="flex-wrap:wrap;gap:4px">
-              <button class="ghost tiny" @click="lsPreset('return n_it_nor;')">Linear</button>
-              <button class="ghost tiny" @click="lsPreset('return n_it_nor * n_it_nor;')">Ease in</button>
-              <button class="ghost tiny" @click="lsPreset('return 1 - (1-n_it_nor)*(1-n_it_nor);')">Ease out</button>
-              <button class="ghost tiny" @click="lsPreset('return Math.sin(n_it_nor * Math.PI);')">Bell</button>
-              <button class="ghost tiny" @click="lsPreset('return Math.abs(Math.sin(n_it_nor * Math.PI * 2));')">Wave ×2</button>
-              <button class="ghost tiny" @click="lsPreset('return Math.abs(Math.sin(n_it_nor * Math.PI * 4));')">Wave ×4</button>
-              <button class="ghost tiny" @click="lsPreset('return Math.sin(n_it_nor * Math.PI * 2);')">Alt ×2</button>
-              <button class="ghost tiny" @click="lsPreset('return Math.sin(n_it_nor * Math.PI * 4);')">Alt ×4</button>
-            </div>
-            <textarea x-model="lsCode" rows="3" style="width:100%;margin-top:6px;font-family:monospace;font-size:11px;background:#0e1116;color:#cdd6f4;border:1px solid #2a3340;border-radius:4px;padding:6px;box-sizing:border-box;resize:vertical"></textarea>
-            <div class="btnrow" style="margin-top:4px">
-              <button class="ghost tiny" @click="lsApplyCode()">Apply formula</button>
-            </div>
-          </div>
-
-          <div class="grp">
-            <h4>Preview</h4>
-            <p class="hint">Audition what a single link looks like at any point along the chain. This is visual only — does not affect the base mesh or the chain layout.</p>
-            <div class="row col">
-              <div class="row" style="margin:0"><label>Preview n_it_nor</label><input x-model.number="lsPreviewT" type="number" step="0.05" min="0" max="1"></div>
-              <input x-model.number="lsPreviewT" type="range" min="0" max="1" step="0.01">
-            </div>
-          </div>
+        <div class="btnrow">
+          <button :class="{ ghost: decoLoaded }" @click="decoChooseFiles()" :disabled="decoBusy" x-text="decoLoaded?'Replace object…':'Load object…'">Load object…</button>
+          <button class="ghost" @click="decoRemove()" x-show="decoLoaded">Remove</button>
         </div>
-      </section>
+        <input id="decoFileInput" type="file" multiple accept=".obj,.mtl,.glb,.gltf,.bin,.ply,.stl,.png,.jpg,.jpeg,.webp" hidden @change="decoOnFileInput($event)">
+        <p class="hint" x-show="!decoLoaded">For a textured model pick the <b>.obj together with its .mtl and texture image(s)</b> (or a single .glb) — or drop them all onto the view.</p>
+        <p class="hint" x-html="decoInfo"></p>
 
-      <!-- STEP 2 -->
-      <section class="step" id="s2"
-        :class="{ open: openId==='s2', active: activeId==='s2', done: steps.s2.done, locked: steps.s2.locked }">
-        <div class="head" @click="toggleStep('s2')"><span class="num">2</span> Mark pin &amp; hole</div>
-        <div class="body" x-show="openId==='s2'">
-          <p class="hint"><span class="swatch" style="background:var(--pin)"></span><b>Pin</b> and
-             <span class="swatch" style="background:var(--hole)"></span><b>hole</b> are shown as vertical cylinders.
-             Each next link is placed so its <b>hole lands on the previous link's pin</b>.</p>
-          <div class="grp">
-            <h4>Pin location</h4>
-            <div class="btnrow"><button class="ghost tiny" @click="setArm('placePin')">Click part to place pin <span class="pill armed" x-show="arm==='placePin'">click…</span></button></div>
-            <div class="row"><label>x / y (mm)</label>
-              <input x-model.number="pin.x" type="number" step="0.1"><input x-model.number="pin.y" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input x-model.number="pin.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input x-model.number="pin.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"></div>
-            <div class="row"><label>z (mm)</label><input x-model.number="pin.z" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">Z</span><input x-model.number="pin.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"></div>
+        <div class="card" x-show="decoLoaded && !decoFused">
+          <h3>Place it</h3>
+          <p class="hint">Drag the handles in the view: <b>arrows</b> move, <b>rings</b> turn, <b>outer ring</b> resizes, <b>cubes</b> stretch. Hold <kbd>Shift</kbd> to snap.</p>
+          <div class="btnrow">
+            <button class="ghost sm" @click="decoDrop()">Drop onto link</button>
+            <button class="ghost sm" @click="decoCenter()">Centre over link</button>
+            <button class="ghost sm" @click="decoReset()">Reset</button>
           </div>
-          <div class="grp">
-            <h4>Hole location</h4>
-            <div class="btnrow"><button class="ghost tiny" @click="setArm('placeHole')">Click part to place hole <span class="pill armed" x-show="arm==='placeHole'">click…</span></button></div>
-            <div class="row"><label>x / y (mm)</label>
-              <input x-model.number="hole.x" type="number" step="0.1"><input x-model.number="hole.y" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input x-model.number="hole.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input x-model.number="hole.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"></div>
-            <div class="row"><label>z (mm)</label><input x-model.number="hole.z" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">Z</span><input x-model.number="hole.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"></div>
-            <p class="hint">Pin and hole at different <b>z</b> tilt each link, so the chain climbs a step every link — like a ladder.</p>
+          <div class="row"><label>Turn 90° around</label>
+            <div class="seg">
+              <button @click="decoRot90('x')">X</button>
+              <button @click="decoRot90('y')">Y</button>
+              <button @click="decoRot90('z')">Z</button>
+            </div></div>
+          <div class="row"><label>Size — longest side (mm)</label><input x-model.number="decoSize" type="number" step="0.5" min="0.1"></div>
+          <div class="btnrow undo">
+            <button class="ghost sm" :disabled="!canUndo" @click="undo()" title="Ctrl+Z">↶ Undo</button>
+            <button class="ghost sm" :disabled="!canRedo" @click="redo()" title="Ctrl+Shift+Z">↷ Redo</button>
           </div>
-          <div class="grp">
-            <h4>Mating test</h4>
-            <p class="hint">A ghost of the <span class="swatch" style="background:var(--mate)"></span>neighbouring link is placed so its <b>hole sits on this part's pin</b>. Tune pin &amp; hole until it clears (green) — that's the tightest spot two links share.</p>
-            <div class="btnrow"><button class="ghost tiny" :class="{ on: matePreviewOn }" @click="toggleMate()">◧ Show mated neighbour</button></div>
-            <p class="hint" id="mateOut" x-html="mateOut"></p>
-          </div>
-          <p class="hint" id="anchorWarn" x-html="anchorWarn"></p>
-          <div class="row" style="margin-top:6px"><button @click="s2Next()" :disabled="s2nextDisabled">Build chain →</button></div>
+          <p class="verdictline" x-html="decoTouch"></p>
+          <p class="verdictline" x-html="decoMate"></p>
+          <label class="check"><input type="checkbox" x-model="decoMateOn"> <span>Show the next link while placing</span></label>
+
+          <details class="fold inner">
+            <summary>Exact position, rotation &amp; scale</summary>
+            <div class="foldbody">
+              <p class="hint">The three boxes are X, Y and Z.</p>
+              <div class="row xyz"><label>Position (mm)</label>
+                <input x-model.number="decoPos.x" type="number" step="0.1"><input x-model.number="decoPos.y" type="number" step="0.1"><input x-model.number="decoPos.z" type="number" step="0.1"></div>
+              <div class="row xyz"><label>Rotation (°)</label>
+                <input x-model.number="decoRot.x" type="number" step="1"><input x-model.number="decoRot.y" type="number" step="1"><input x-model.number="decoRot.z" type="number" step="1"></div>
+              <div class="row xyz"><label>Scale (×)</label>
+                <input x-model.number="decoScale.x" type="number" step="0.01" min="0.001"><input x-model.number="decoScale.y" type="number" step="0.01" min="0.001"><input x-model.number="decoScale.z" type="number" step="0.01" min="0.001"></div>
+              <div class="row"><label>Sink into the link on drop (mm)</label><input x-model.number="decoSink" type="number" step="0.1" min="0"></div>
+              <div class="row"><label>Handles follow</label>
+                <div class="seg">
+                  <button :class="{ on: decoSpace==='local' }" @click="decoSpace='local'">Object</button>
+                  <button :class="{ on: decoSpace==='world' }" @click="decoSpace='world'">Plate</button>
+                </div></div>
+              <label class="check"><input type="checkbox" x-model="decoSnap"> <span>Always snap (1 mm · 15° · 0.05×)</span></label>
+            </div>
+          </details>
         </div>
-      </section>
 
-      <!-- DECORATE (optional) -->
-      <section class="step" id="deco"
-        :class="{ open: openId==='deco', active: activeId==='deco', done: steps.deco.done, locked: steps.deco.locked }">
-        <div class="head" @click="toggleStep('deco')"><span class="num">✿</span> Decorate link (optional)</div>
-        <div class="body" x-show="openId==='deco'">
-          <p class="hint">Sit a fun object on every link — a duck, a chilli, … Load it, place it with the gizmo, and it's <b>fused into the link</b> as one coloured solid, so the whole chain comes out multi-colour. Textured models keep their colours: pick the <b>.obj together with its .mtl and texture image(s)</b> (or a .glb), or drop them all on the viewport while this step is open.</p>
-
-          <div class="grp">
-            <h4>Object</h4>
-            <div class="btnrow">
-              <button class="ghost" @click="decoChooseFiles()" :disabled="decoBusy" x-text="decoLoaded?'Replace object…':'Load object…'">Load object…</button>
-              <button class="ghost tiny" @click="decoRemove()" x-show="decoLoaded">Remove</button>
+        <details class="fold" x-show="decoLoaded">
+          <summary>Colours &amp; detail</summary>
+          <div class="foldbody">
+            <div x-show="decoColorSource!=='none'">
+              <div class="srow"><label>Object colours</label><input x-model.number="decoShades" type="range" min="1" max="7" step="1" :disabled="decoFused"><span class="val" x-text="decoShades"></span></div>
+              <p class="hint">One colour per filament — a chilli is red + green = 2.</p>
             </div>
-            <input id="decoFileInput" type="file" multiple accept=".obj,.mtl,.glb,.gltf,.bin,.ply,.stl,.png,.jpg,.jpeg,.webp" hidden @change="decoOnFileInput($event)">
-            <p class="hint" x-html="decoInfo"></p>
-            <div x-show="decoLoaded">
-              <div class="row col" x-show="decoColorSource!=='none'">
-                <div class="row" style="margin:0"><label>Object colours</label><span class="rnglbl" style="width:auto" x-text="decoShades"></span></div>
-                <input x-model.number="decoShades" type="range" min="1" max="7" step="1" :disabled="decoFused">
-                <p class="hint" style="margin:2px 0 0">Collapses the object's colours to this many — one per filament (a chilli: red + green = 2).</p>
-              </div>
-              <div class="row" x-show="decoColorSource==='none'"><label>Object colour</label><input type="color" x-model="decoFlatColor" :disabled="decoFused"></div>
-              <div class="row" x-show="!linkHasColor"><label>Link colour</label><input type="color" x-model="decoLinkColor" :disabled="decoFused"></div>
-              <div class="row col">
-                <div class="row" style="margin:0"><label>Object detail (verts)</label><input x-model.number="decoMaxVerts" type="number" min="200" max="60000" step="500" :disabled="decoFused"></div>
-                <input x-model.number="decoMaxVerts" type="range" min="200" max="30000" step="100" :disabled="decoFused">
-              </div>
-            </div>
-          </div>
-
-          <div class="grp" x-show="decoLoaded && !decoFused">
-            <h4>Place</h4>
-            <p class="hint"><b>Arrows</b> move · <b>rings</b> rotate · <b>cubes</b> stretch one axis · <b>outer ring</b> resizes · <b>centre ball</b> moves freely. Hold <kbd>Shift</kbd> to snap (1 mm · 15° · 0.05×). Alt+drag / right-drag still orbit &amp; pan.</p>
-            <div class="row"><label>Gizmo axes</label>
-              <div class="btnrow">
-                <button class="ghost tiny" :class="{ on: decoSpace==='local' }" @click="decoSpace='local'">Object</button>
-                <button class="ghost tiny" :class="{ on: decoSpace==='world' }" @click="decoSpace='world'">Plate</button>
-                <button class="ghost tiny" :class="{ on: decoSnap }" @click="decoSnap=!decoSnap">Snap</button>
-              </div></div>
-            <div class="btnrow">
-              <button class="ghost tiny" @click="decoDrop()">Drop onto link</button>
-              <button class="ghost tiny" @click="decoCenter()">Centre over link</button>
-              <button class="ghost tiny" @click="decoRot90('x')">Rot X 90°</button>
-              <button class="ghost tiny" @click="decoRot90('y')">Rot Y 90°</button>
-              <button class="ghost tiny" @click="decoRot90('z')">Rot Z 90°</button>
-              <button class="ghost tiny" @click="decoReset()">Reset</button>
-            </div>
-            <div class="row"><label>Sink into link on drop (mm)</label><input x-model.number="decoSink" type="number" step="0.1" min="0"></div>
-            <div class="row"><label>Position x / y / z (mm)</label>
-              <input x-model.number="decoPos.x" type="number" step="0.1"><input x-model.number="decoPos.y" type="number" step="0.1"><input x-model.number="decoPos.z" type="number" step="0.1"></div>
-            <div class="row"><label>Rotation x / y / z (°)</label>
-              <input x-model.number="decoRot.x" type="number" step="1"><input x-model.number="decoRot.y" type="number" step="1"><input x-model.number="decoRot.z" type="number" step="1"></div>
-            <div class="row"><label>Scale x / y / z (×)</label>
-              <input x-model.number="decoScale.x" type="number" step="0.01" min="0.001"><input x-model.number="decoScale.y" type="number" step="0.01" min="0.001"><input x-model.number="decoScale.z" type="number" step="0.01" min="0.001"></div>
-            <div class="row"><label>Size — longest side (mm)</label><input x-model.number="decoSize" type="number" step="0.5" min="0.1"></div>
-            <div class="btnrow">
-              <button class="ghost tiny" :disabled="!canUndo" @click="undo()">↶ Undo</button>
-              <button class="ghost tiny" :disabled="!canRedo" @click="redo()">↷ Redo</button>
-            </div>
-          </div>
-
-          <div class="grp" x-show="decoLoaded && !decoFused">
-            <h4>Check</h4>
-            <p class="hint" x-html="decoTouch"></p>
-            <div class="btnrow"><button class="ghost tiny" :class="{ on: decoMateOn }" @click="decoMateOn=!decoMateOn">◧ Show neighbouring link</button></div>
-            <p class="hint" x-html="decoMate"></p>
-          </div>
-
-          <div class="grp" x-show="decoLoaded">
-            <h4>Fuse</h4>
-            <div class="row" x-show="!decoFused"><label>Method</label>
+            <div class="row" x-show="decoColorSource==='none'"><label>Object colour</label><input type="color" x-model="decoFlatColor" :disabled="decoFused"></div>
+            <div class="row" x-show="!linkHasColor"><label>Link colour</label><input type="color" x-model="decoLinkColor" :disabled="decoFused"></div>
+            <div class="srow"><label>Object detail (vertices)</label><input x-model.number="decoMaxVerts" type="range" min="200" max="30000" step="100" :disabled="decoFused"><input x-model.number="decoMaxVerts" type="number" min="200" max="60000" step="500" :disabled="decoFused"></div>
+            <div class="row" x-show="!decoFused"><label>Join method</label>
               <select x-model="decoFuseMode">
-                <option value="csg">Boolean union — one clean shell</option>
-                <option value="merge">Merge shells — slicer unions them</option>
+                <option value="csg">One clean shell (boolean union)</option>
+                <option value="merge">Overlapping shells (slicer joins them)</option>
               </select></div>
-            <div class="btnrow">
-              <button class="ghost tiny" @click="decoFuse()" x-show="!decoFused">Fuse into link</button>
-              <button class="ghost tiny" @click="decoUnfuse()" x-show="decoFused" :disabled="!decoCanEdit">✎ Edit placement</button>
-            </div>
-            <p class="hint" x-html="decoFuseOut"></p>
-            <div class="btnrow" x-show="decoFused && decoNeedCap">
-              <button class="ghost tiny" @click="simMaxVerts=decoNeedCap; decoNeedCap=0">Keep this detail (cap → <span x-text="decoNeedCap.toLocaleString()"></span> verts/link)</button>
-            </div>
-            <p class="hint" x-show="decoFused">The chain now uses the decorated link. <b>Edit placement</b> brings back the plain link + movable object (sculpt / cut edits made after fusing are dropped).</p>
-            <p class="hint" x-show="!decoFused">Leaving this step fuses the object automatically.</p>
+            <p class="hint" x-show="decoFused">Press <b>Edit placement</b> below to change these.</p>
           </div>
-          <div class="row" style="margin-top:6px" x-show="decoLoaded"><button @click="decoNext()" x-text="decoFused?'Continue →':'Fuse &amp; continue →'"></button></div>
+        </details>
+
+        <div class="card" x-show="decoLoaded">
+          <h3 x-text="decoFused ? 'Fused into the link' : 'Fuse'">Fuse</h3>
+          <p class="hint" x-show="!decoFused">Fusing makes object and link one solid. It also happens automatically when you leave this page.</p>
+          <div class="btnrow">
+            <button class="ghost sm" @click="decoFuse()" x-show="!decoFused">Fuse now</button>
+            <button class="ghost sm" @click="decoUnfuse()" x-show="decoFused" :disabled="!decoCanEdit">✎ Edit placement</button>
+          </div>
+          <p class="hint" x-html="decoFuseOut"></p>
+          <div class="btnrow" x-show="decoFused && decoNeedCap">
+            <button class="ghost sm" @click="simMaxVerts=decoNeedCap; decoNeedCap=0">Keep this detail (raise the limit to <span x-text="decoNeedCap.toLocaleString()"></span> vertices per link)</button>
+          </div>
+          <p class="hint" x-show="decoFused">The chain now uses the decorated link. <b>Edit placement</b> brings back the plain link and the movable object (sculpt or cut edits made after fusing are dropped).</p>
         </div>
       </section>
 
-      <!-- STEP 3 -->
-      <section class="step" id="s3"
-        :class="{ open: openId==='s3', active: activeId==='s3', done: steps.s3.done, locked: steps.s3.locked }">
-        <div class="head" @click="toggleStep('s3')"><span class="num">3</span> Build chain</div>
-        <div class="body" x-show="openId==='s3'">
-          <div id="chainLenCard" class="chainlen">
-            <span class="chainlen-lbl">Chain length</span>
-            <b id="chainLenVal" x-text="chainLenVal">—</b>
-            <span class="chainlen-sub" id="chainLenSub" x-text="chainLenSub"></span>
+      <!-- ============================ 2 · JOINTS ============================ -->
+      <section class="page" id="s2" x-show="openId==='s2'">
+        <div class="pagehead"><h2>Joints</h2></div>
+        <p class="lead">Every link's <b class="chole">hole</b> hooks onto the <b class="cpin">pin</b> of the link before it. <b>Drag</b> the red and blue markers in the view to where the pin and the hole are on your part.</p>
+
+        <div class="card statcard" :class="mateState">
+          <div class="cardhead">
+            <h3>Fit check</h3>
+            <label class="check"><input type="checkbox" :checked="matePreviewOn" @change="toggleMate()"> <span>Show the next link</span></label>
           </div>
-          <div class="row"><label>Shape</label>
-            <select x-model="shape">
-              <option value="straight">Straight chain</option>
-              <option value="spiral">Spiral</option>
-            </select></div>
-          <div class="row col"><div class="row" style="margin:0"><label>Links</label><input x-model.number="count" type="number" min="2" max="5000"></div>
-            <input x-model.number="count" type="range" min="2" max="2000"></div>
-          <template x-if="shape==='spiral'">
-            <div>
-              <div class="row col"><div class="row" style="margin:0"><label>Start radius (mm)</label><input x-model.number="startR" type="number" step="1"></div>
-                <input x-model.number="startR" type="range" min="0" max="150" step="1"></div>
-              <div class="row col"><div class="row" style="margin:0"><label>Loop spacing (mm/turn)</label><input x-model.number="spacing" type="number" step="0.5"></div>
-                <input x-model.number="spacing" type="range" min="2" max="60" step="0.5"></div>
-              <p class="hint">Archimedean spiral <b>r = a + bθ</b>. Start radius <b>a</b> is the innermost radius (offset so it doesn't start at the centre). Loop spacing is the radial gap between successive turns — keep it bigger than the part width so loops don't collide.</p>
+          <p class="verdict" :class="mateState" x-show="mateState" id="mateOut"><span x-text="mateState==='ok' ? '✓' : '✗'"></span> <span x-text="mateOut"></span></p>
+          <p class="hint" x-show="!mateState && !anchorWarn">The <span class="swatch" style="background:var(--mate)"></span>next link is drawn with its hole on this link's pin, so you can see at once whether the two touch.</p>
+          <p class="verdict bad" id="anchorWarn" x-show="anchorWarn" x-text="anchorWarn"></p>
+        </div>
+
+        <div class="card anchor">
+          <div class="cardhead">
+            <h3><span class="swatch" style="background:var(--pin)"></span>Pin</h3>
+            <button class="ghost sm" :class="{ on: arm==='placePin' }" @click="setArm('placePin')" x-text="arm==='placePin' ? 'Now click the part…' : 'Place by clicking'">Place by clicking</button>
+          </div>
+          <div class="arow"><label>X</label><input x-model.number="pin.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"><input x-model.number="pin.x" type="number" step="0.1"></div>
+          <div class="arow"><label>Y</label><input x-model.number="pin.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"><input x-model.number="pin.y" type="number" step="0.1"></div>
+          <div class="arow"><label>Z</label><input x-model.number="pin.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"><input x-model.number="pin.z" type="number" step="0.1"></div>
+        </div>
+        <div class="card anchor">
+          <div class="cardhead">
+            <h3><span class="swatch" style="background:var(--hole)"></span>Hole</h3>
+            <button class="ghost sm" :class="{ on: arm==='placeHole' }" @click="setArm('placeHole')" x-text="arm==='placeHole' ? 'Now click the part…' : 'Place by clicking'">Place by clicking</button>
+          </div>
+          <div class="arow"><label>X</label><input x-model.number="hole.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"><input x-model.number="hole.x" type="number" step="0.1"></div>
+          <div class="arow"><label>Y</label><input x-model.number="hole.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"><input x-model.number="hole.y" type="number" step="0.1"></div>
+          <div class="arow"><label>Z</label><input x-model.number="hole.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"><input x-model.number="hole.z" type="number" step="0.1"></div>
+        </div>
+        <p class="hint">Positions are in mm. <b>Z</b> is height: leave both at 0 for a flat chain — different heights make the chain climb one step per link, like a ladder.</p>
+
+      </section>
+
+      <!-- ============================ 3 · CHAIN ============================ -->
+      <section class="page" id="s3" x-show="openId==='s3'">
+        <div class="pagehead"><h2>Chain</h2></div>
+
+        <div id="chainLenCard" class="card statcard" :class="chainState">
+          <div class="bigstat"><b id="chainLenVal" x-text="chainLenVal">—</b><span id="chainLenSub" x-text="chainLenSub"></span></div>
+          <p class="verdict ok" x-show="chainState==='ok'">✓ No links touch — it will print as a moving chain.</p>
+          <div x-show="chainState==='bad'">
+            <p class="verdict bad">✗ <span x-text="chainBad"></span> links overlap (shown red) — they would fuse together.</p>
+            <p class="hint">Open <a class="link" @click="$refs.jointFold.open=true; $refs.jointFold.scrollIntoView({block:'nearest',behavior:'smooth'})">Fine-tune joints</a> and move pin and hole until the red clears.<span x-show="shape==='spiral'"> For a spiral, a larger start radius or loop spacing also helps.</span></p>
+          </div>
+          <p class="verdict warn" x-show="chainState==='unchecked'">Overlaps not checked yet — that takes a moment with this many links.
+            <button class="ghost sm" @click="recheck()">Check now</button></p>
+          <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm plate.</p>
+          <p class="hint" x-show="!chainOff && chainFoot">Footprint <span x-text="chainFoot"></span> — fits the <span x-text="plate"></span> mm plate.</p>
+        </div>
+
+        <div class="row"><label>Shape</label>
+          <div class="seg">
+            <button :class="{ on: shape==='straight' }" @click="shape='straight'">Straight</button>
+            <button :class="{ on: shape==='spiral' }"   @click="shape='spiral'">Spiral</button>
+          </div></div>
+        <div class="srow"><label>Links</label><input x-model.number="count" type="range" min="2" max="400"><input x-model.number="count" type="number" min="2" max="5000"></div>
+        <div x-show="shape==='spiral'">
+          <div class="srow"><label>Start radius (mm)</label><input x-model.number="startR" type="range" min="0" max="150" step="1"><input x-model.number="startR" type="number" step="1"></div>
+          <div class="srow"><label>Loop spacing (mm)</label><input x-model.number="spacing" type="range" min="2" max="60" step="0.5"><input x-model.number="spacing" type="number" step="0.5"></div>
+          <p class="hint">Start radius is the size of the hole in the middle. Loop spacing is the distance from one turn to the next — keep it larger than the part is wide, or the turns collide.</p>
+        </div>
+        <p class="hint" x-show="shape==='straight'">A straight chain along X. How far apart the links sit follows from the pin–hole distance.</p>
+
+        <details class="fold" x-ref="jointFold">
+          <summary>Fine-tune joints</summary>
+          <div class="foldbody">
+            <p class="hint">Nudge the <span class="swatch" style="background:var(--pin)"></span>pin and <span class="swatch" style="background:var(--hole)"></span>hole here and watch the whole chain re-lay itself — until no link is red.</p>
+            <h4>Pin</h4>
+            <div class="arow"><label>X</label><input x-model.number="pin.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"><input x-model.number="pin.x" type="number" step="0.1"></div>
+            <div class="arow"><label>Y</label><input x-model.number="pin.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"><input x-model.number="pin.y" type="number" step="0.1"></div>
+            <div class="arow"><label>Z</label><input x-model.number="pin.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"><input x-model.number="pin.z" type="number" step="0.1"></div>
+            <h4>Hole</h4>
+            <div class="arow"><label>X</label><input x-model.number="hole.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"><input x-model.number="hole.x" type="number" step="0.1"></div>
+            <div class="arow"><label>Y</label><input x-model.number="hole.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"><input x-model.number="hole.y" type="number" step="0.1"></div>
+            <div class="arow"><label>Z</label><input x-model.number="hole.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"><input x-model.number="hole.z" type="number" step="0.1"></div>
+          </div>
+        </details>
+
+        <details class="fold">
+          <summary>Size along the chain</summary>
+          <div class="foldbody">
+            <p class="hint">Make links bigger or smaller along the chain. Pick a pattern, then tweak its numbers in the code if you like — the chain re-spaces itself so the joints still meet.</p>
+            <div class="btnrow">
+              <button class="ghost sm" @click="scalePreset('same')">Same size</button>
+              <button class="ghost sm" @click="scalePreset('taper')">Taper</button>
+              <button class="ghost sm" @click="scalePreset('grow')">Grow</button>
+              <button class="ghost sm" @click="scalePreset('belly')">Belly</button>
+              <button class="ghost sm" @click="scalePreset('wave')">Wave</button>
+              <button class="ghost sm" @click="scalePreset('scales')">Zig-zag</button>
             </div>
-          </template>
-          <template x-if="shape==='straight'">
-            <p class="hint">A straight chain along +X. Link pitch comes from the pin/hole spacing.</p>
-          </template>
-          <div class="grp">
-            <h4>Path function (advanced)</h4>
-            <p class="hint">The chain's centre-line as JS: <code>f(t, n_it, n_it_nor, z_stack) → {x, y, z}</code> in mm. <code>t</code> grows continuously along the curve (its scale isn't 1-per-link). <code>n_it</code> is the index (0…count-1) of the link being placed, <code>n_it_nor</code> that index normalized to 0…1 — use either for anything that should step <i>per link</i>, e.g. <code>z: n_it * 3</code> for a staircase. <code>z</code> only ever lifts a link, it never tilts it (rotation is always worked out in x/y only) — same for <code>z_stack</code>, the height already added by the pin/hole z slider before this link, which is applied automatically on top of your <code>z</code> (it's there to react to, not to return). Changing the Shape selector / Start-radius / Loop-spacing controls above <b>rewrites</b> this function.</p>
-            <div id="pathEditor"></div>
-            <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="pathReset()">Reset path (from Shape)</button></div>
-            <p class="hint" id="pathErr" x-text="pathErr" :style="pathErrColor?('color:'+pathErrColor):''"></p>
-          </div>
-          <div class="grp">
-            <h4>Joint anchors (live)</h4>
-            <p class="hint">Nudge the <span class="swatch" style="background:var(--pin)"></span>pin / <span class="swatch" style="background:var(--hole)"></span>hole to retune link pitch &amp; body offset until overlaps (red) clear — the chain re-lays as you type.</p>
-            <div class="row"><label>pin x / y (mm)</label>
-              <input x-model.number="pin.x" type="number" step="0.1"><input x-model.number="pin.y" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input x-model.number="pin.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input x-model.number="pin.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"></div>
-            <div class="row"><label>pin z (mm)</label><input x-model.number="pin.z" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">Z</span><input x-model.number="pin.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"></div>
-            <div class="row"><label>hole x / y (mm)</label>
-              <input x-model.number="hole.x" type="number" step="0.1"><input x-model.number="hole.y" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">X</span><input x-model.number="hole.x" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"></div>
-            <div class="rngrow"><span class="rnglbl">Y</span><input x-model.number="hole.y" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"></div>
-            <div class="row"><label>hole z (mm)</label><input x-model.number="hole.z" type="number" step="0.1"></div>
-            <div class="rngrow"><span class="rnglbl">Z</span><input x-model.number="hole.z" type="range" step="0.1" :min="anchorZmin" :max="anchorZmax"></div>
-          </div>
-          <div class="grp">
-            <h4>Size variation (per part)</h4>
-            <p class="hint">JS <code>f(n_it, n_it_nor) → scale</code>. <code>n_it</code> = part index, <code>n_it_nor</code> = that index normalized to 0–1. Return a single number for a uniform scale, or <code>{x, y, z}</code> to scale each axis independently — e.g. stretch a link taller without widening it. Edits apply live; the chain re-spaces so joints still mate. <code>1</code> = original size on that axis.</p>
-            <div id="scaleEditor"></div>
-            <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="scaleReset()">Reset to default</button></div>
+            <div id="scaleEditor" class="editor"></div>
             <p class="hint" id="scaleErr" x-text="scaleErr" :style="scaleErrColor?('color:'+scaleErrColor):''"></p>
+            <details class="help"><summary>How the code works</summary>
+              <p class="hint">JavaScript <code>f(n_it, n_it_nor) → scale</code>. <code>n_it</code> is the link number (0, 1, 2 …), <code>n_it_nor</code> the same counted from 0 (first link) to 1 (last link). Return one number to scale the whole link, or <code>{x, y, z}</code> to scale each direction separately — e.g. taller without getting wider. <code>1</code> = original size.</p></details>
           </div>
-          <div class="grp">
-            <h4>Colour variation (per part)</h4>
-            <p class="hint">JS <code>f(n_it, n_it_nor, base) → colour</code>. <code>n_it</code> = part index, <code>n_it_nor</code> = that index normalized to 0–1, <code>base</code> = the part's natural colour <code>{r, g, b}</code> (each 0–1). Return <code>'invert'</code> to swap this part's colours (e.g. white↔green on a 2-colour model), a colour to tint it (hex <code>0xff0000</code>, CSS <code>'#ff0000'</code>/<code>'tomato'</code>, or <code>{r, g, b}</code>), or <code>base</code> to leave it. The default swaps colours on every 2nd part. A tint <i>multiplies</i> a coloured model's own colours; on a plain part it sets the colour outright. Baked into colour exports (GLB/glTF/OBJ); STL has no colour.</p>
-            <div id="colorEditor"></div>
-            <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="colorReset()">Reset to default</button></div>
+        </details>
+
+        <details class="fold">
+          <summary>Colour along the chain</summary>
+          <div class="foldbody">
+            <p class="hint">Give the links different colours. Colours are saved in OBJ, GLB and PLY files; STL has no colour.</p>
+            <div class="btnrow">
+              <button class="ghost sm" @click="colorPreset('alternate')">Alternate</button>
+              <button class="ghost sm" @click="colorPreset('plain')">All the same</button>
+              <button class="ghost sm" @click="colorPreset('gradient')">Gradient</button>
+              <button class="ghost sm" @click="colorPreset('rainbow')">Rainbow</button>
+            </div>
+            <div id="colorEditor" class="editor"></div>
             <p class="hint" id="colorErr" x-text="colorErr" :style="colorErrColor?('color:'+colorErrColor):''"></p>
+            <details class="help"><summary>How the code works</summary>
+              <p class="hint">JavaScript <code>f(n_it, n_it_nor, base) → colour</code>. <code>base</code> is the link's own colour <code>{r, g, b}</code> (each 0–1). Return <code>'invert'</code> to swap the link's colours (white↔green on a 2-colour model), a colour to tint it (<code>0xff0000</code>, <code>'#ff0000'</code>, <code>'tomato'</code> or <code>{r, g, b}</code>), or <code>base</code> to leave it. A tint <i>multiplies</i> a coloured model's own colours; on a plain part it sets the colour outright.</p></details>
           </div>
-          <div class="row"><label>Plate size (mm, square)</label><input x-model.number="plate" type="number" step="10"></div>
-          <div class="btnrow" style="margin-top:6px"><button class="ghost tiny" @click="recheck()">Re-check collisions</button></div>
-          <p class="hint" id="solveOut" x-html="solveOut"></p>
-          <div class="row" style="margin-top:6px"><button @click="s3Next()" :disabled="s3nextDisabled">Go to export →</button></div>
-        </div>
+        </details>
+
+        <details class="fold">
+          <summary>Custom path (code)</summary>
+          <div class="foldbody">
+            <p class="hint">Any curve you like, as JavaScript: return the point <code>{x, y, z}</code> in mm for a position <code>t</code> along the curve. The Shape, Start radius and Loop spacing controls above <b>rewrite</b> this code.</p>
+            <div id="pathEditor" class="editor"></div>
+            <p class="hint" id="pathErr" x-text="pathErr" :style="pathErrColor?('color:'+pathErrColor):''"></p>
+            <div class="btnrow"><button class="ghost sm" @click="pathReset()">Reset to the shape above</button></div>
+            <details class="help"><summary>How the code works</summary>
+              <p class="hint"><code>f(t, n_it, n_it_nor, z_stack) → {x, y, z}</code>. <code>t</code> grows continuously along the curve (not one per link). <code>n_it</code> is the number (0 … count-1) of the link being placed, <code>n_it_nor</code> the same from 0 to 1 — use these for anything that should step <i>per link</i>, e.g. <code>z: n_it * 3</code> for a staircase. <code>z</code> only lifts a link, it never tilts it. <code>z_stack</code> is the height already added by the pin/hole Z values before this link; it is applied automatically on top of your <code>z</code>, so read it if you need it but don't return it.</p></details>
+          </div>
+        </details>
+
+        <details class="fold">
+          <summary>Build plate <span class="sum" x-text="plate+' mm'"></span></summary>
+          <div class="foldbody">
+            <div class="row"><label>Plate size (mm, square)</label><input x-model.number="plate" type="number" step="10"></div>
+            <div class="btnrow"><button class="ghost sm" @click="recheck()">Re-check collisions</button></div>
+            <p class="hint" id="solveOut" x-html="solveOut"></p>
+          </div>
+        </details>
       </section>
 
-      <!-- STEP 4 -->
-      <section class="step" id="s4"
-        :class="{ open: openId==='s4', active: activeId==='s4', done: steps.s4.done, locked: steps.s4.locked }">
-        <div class="head" @click="toggleStep('s4')"><span class="num">4</span> Export</div>
-        <div class="body" x-show="openId==='s4'">
-          <p class="hint">All links merge into one mesh as separate, non-touching solids — a print-in-place articulated chain.</p>
-          <div class="grp">
-            <h4>Swap individual links</h4>
-            <p class="hint">Replace any one link with a different model (e.g. a clasp or charm). It's fitted into that link's slot — give your model a matching pin/hole so it still interlocks, and use X-ray / Section / collision colours to check.</p>
-            <div class="btnrow"><button class="ghost tiny" @click="setArm('pickLink')">Select link in viewport <span class="pill armed" x-show="arm==='pickLink'">click…</span></button></div>
-            <p class="hint" id="swapSel" x-text="swapSel">No link selected — click “Select link in viewport”, then a link.</p>
+      <!-- ============================ 4 · EXPORT ============================ -->
+      <section class="page" id="s4" x-show="openId==='s4'">
+        <div class="pagehead"><h2>Export</h2></div>
+        <p class="lead">All links are merged into one file. They stay separate, non-touching solids — so the chain prints in one go and moves when it comes off the plate.</p>
+
+        <div class="card statcard" :class="chainState">
+          <div class="bigstat"><b x-text="chainLenVal">—</b><span x-text="chainLenSub"></span></div>
+          <p class="verdict ok" x-show="chainState==='ok'">✓ No links touch.</p>
+          <p class="verdict bad" x-show="chainState==='bad'">✗ <span x-text="chainBad"></span> links overlap — they would fuse when printed.
+            <button class="ghost sm" @click="goStep('s3')">Fix on the Chain page</button></p>
+          <p class="verdict warn" x-show="chainState==='unchecked'">Overlaps not checked yet. <button class="ghost sm" @click="recheck()">Check now</button></p>
+          <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm plate.</p>
+          <p class="hint" x-show="simEst">Detail: <span x-html="simEst"></span></p>
+        </div>
+
+        <div class="row"><label>File format</label>
+          <select x-model="exportFmt">
+            <option value="auto">Automatic (same as the part)</option>
+            <option value="obj">OBJ — with colours</option>
+            <option value="glb">GLB — with colours</option>
+            <option value="ply">PLY — with colours</option>
+            <option value="stl">STL — no colours</option>
+          </select></div>
+        <p class="hint" x-show="partHasColor">For multi-colour printing choose <b>OBJ</b>: slicers such as Bambu Studio and OrcaSlicer read its colours and map them to filaments.</p>
+        <p class="hint">Press <b x-text="exportLabel"></b> below when you're ready.</p>
+        <p class="verdict ok" id="exportOut" x-show="exportOut" x-html="exportOut"></p>
+
+        <details class="fold">
+          <summary>Swap individual links <span class="sum">e.g. a head or a clasp</span></summary>
+          <div class="foldbody">
+            <p class="hint">Replace one link with a different model. It is fitted into that link's place — give it a matching pin and hole so it still hooks in, and check with X-ray / Section.</p>
+            <div class="btnrow"><button class="ghost sm" :class="{ on: arm==='pickLink' }" @click="setArm('pickLink')" x-text="arm==='pickLink' ? 'Now click a link…' : 'Select a link in the view'">Select a link in the view</button></div>
+            <p class="hint" id="swapSel" x-text="swapSel"></p>
             <div class="btnrow">
-              <button class="ghost tiny" @click="chooseSwapFile()" :disabled="swapFileBtnDisabled">Replace with model…</button>
-              <button class="ghost tiny" @click="swapClear()" :disabled="swapClearDisabled">Revert to base</button>
-              <button class="ghost tiny" @click="swapClearAll()" :disabled="swapClearAllDisabled">Revert all</button>
+              <button class="ghost sm" @click="chooseSwapFile()" :disabled="swapFileBtnDisabled">Replace with a model…</button>
+              <button class="ghost sm" @click="swapClear()" :disabled="swapClearDisabled">Undo this swap</button>
+              <button class="ghost sm" @click="swapClearAll()" :disabled="swapClearAllDisabled">Undo all swaps</button>
             </div>
             <input id="swapFileInput" type="file" accept=".stl,.ply,.obj,.glb,.gltf" hidden @change="onSwapFileInput($event)">
             <template x-if="gizmoActive">
               <div>
-                <p class="hint">Drag the gizmo to nudge this swapped part within its own slot — its pin/hole won't move on its own, so it's there to fix a model that doesn't quite line up.</p>
+                <p class="hint">Drag the handle in the view to nudge the swapped model if it doesn't quite line up.</p>
                 <div class="btnrow">
-                  <button class="ghost tiny" :class="{ on: gizmoMode==='translate' }" @click="gizmoSetMode('translate')">Move</button>
-                  <button class="ghost tiny" :class="{ on: gizmoMode==='rotate' }" @click="gizmoSetMode('rotate')">Rotate</button>
-                  <button class="ghost tiny" @click="gizmoResetAdjust()">Reset nudge</button>
+                  <div class="seg">
+                    <button :class="{ on: gizmoMode==='translate' }" @click="gizmoSetMode('translate')">Move</button>
+                    <button :class="{ on: gizmoMode==='rotate' }" @click="gizmoSetMode('rotate')">Rotate</button>
+                  </div>
+                  <button class="ghost sm" @click="gizmoResetAdjust()">Reset nudge</button>
                 </div>
               </div>
             </template>
           </div>
-          <div class="row"><label>File format</label>
-            <select x-model="exportFmt">
-              <option value="auto">Auto (source format; OBJ if coloured)</option>
-              <option value="obj">OBJ — vertex colours</option>
-              <option value="glb">GLB — vertex colours</option>
-              <option value="ply">PLY — vertex colours</option>
-              <option value="stl">STL — no colour</option>
-            </select></div>
-          <p class="hint">For multi-colour prints use <b>OBJ</b>: the colours travel as vertex colours, which slicers with coloured-OBJ import (e.g. Bambu Studio, OrcaSlicer) map to filaments.</p>
-          <div class="btnrow">
-            <button @click="exportChain()" x-text="exportLabel">⬇ Download STL</button>
-            <button class="ghost" @click="saveCfg()">Save config (JSON)</button>
-            <button class="ghost" @click="chooseCfg()">Load config</button>
-            <input id="cfgInput" type="file" accept=".json" hidden @change="onCfgInput($event)">
-          </div>
-          <p class="hint" id="exportOut" x-html="exportOut"></p>
-        </div>
+        </details>
       </section>
     </div>
+
+    <!-- one primary action per page, always in the same place -->
+    <footer id="foot" x-show="hasPart">
+      <button class="ghost" x-show="backLabel" @click="goBack()" x-text="backLabel"></button>
+      <span class="grow"></span>
+      <button x-show="openId==='s1'" @click="s1Next()">Next: Joints →</button>
+      <button x-show="openId==='s2'" @click="s2Next()" :disabled="s2nextDisabled">Build chain →</button>
+      <button x-show="openId==='s3'" @click="s3Next()" :disabled="s3nextDisabled">Next: Export →</button>
+      <button x-show="openId==='s4'" @click="exportChain()" x-text="exportLabel">⬇ Download STL</button>
+      <button x-show="isTool && openId!=='deco'" @click="closeTool()">✓ Done</button>
+      <button x-show="openId==='deco'" @click="decoNext()" x-text="decoLoaded && !decoFused ? 'Fuse &amp; continue →' : 'Continue →'">Continue →</button>
+    </footer>
   </aside>
   <div id="panelResize" title="Drag to resize"></div>
 
   <!-- ============================ VIEWPORT ============================ -->
-  <main id="view">
+  <main id="view" :class="{ armed: !!arm }">
     <div id="canvasWrap"></div>
     <div id="hud">
-      <div class="chip" id="chipMesh" x-html="chipMesh">No mesh loaded</div>
-      <div class="chip" id="chipSize" x-html="chipSize"></div>
-      <div class="chip" id="chipCollide" x-html="chipCollide"></div>
+      <div class="chip" id="chipMesh" x-show="chipMesh" x-html="chipMesh"></div>
+      <div class="chip" id="chipSize" x-show="chipSize" x-html="chipSize"></div>
+      <div class="chip" id="chipCollide" x-show="chipCollide" x-html="chipCollide"></div>
     </div>
-    <div id="viewcube" title="Click a face to snap to that view"></div>
+    <div id="armHint" x-show="arm">
+      <span x-text="armHint"></span>
+      <button class="ghost sm" @click="setArm(null)">Cancel <kbd>Esc</kbd></button>
+    </div>
+    <div id="viewcube" title="Click a face to look from that side"></div>
     <div id="viewbtns">
-      <button title="Isometric"        @click="setView('iso')">Iso</button>
-      <button title="Top (down +Z)"    @click="setView('top')">Top</button>
-      <button title="Front (along +Y)" @click="setView('front')">Front</button>
-      <button title="Side (along +X)"  @click="setView('side')">Side</button>
+      <button title="Fit everything, seen from an angle" @click="setView('iso')">Iso</button>
+      <button title="From above"         @click="setView('top')">Top</button>
+      <button title="From the front"     @click="setView('front')">Front</button>
+      <button title="From the side"      @click="setView('side')">Side</button>
     </div>
     <div id="renderbtns">
-      <button title="Show mesh vertices as points (any step)" :class="{ on: showVerts }" @click="toggleVerts()">Vertices</button>
-      <button title="Show mesh wireframe (any step)" :class="{ on: showWire }" @click="toggleWire()">Wireframe</button>
-      <button title="X-ray: semi-transparent parts + outlines" :class="{ on: xray }" @click="toggleXray()">X-ray</button>
-      <button title="Section / layer view: sweep a cut plane down through Z" :class="{ on: section }" @click="toggleSection()">Section</button>
+      <button title="See-through parts with outlines — spot where links touch" :class="{ on: xray }" @click="toggleXray()">X-ray</button>
+      <button title="Slice the model open at a height you choose" :class="{ on: section }" @click="toggleSection()">Section</button>
+      <button title="Show the mesh triangles" :class="{ on: showWire }" @click="toggleWire()">Wireframe</button>
+      <button title="Show the mesh vertices as dots" :class="{ on: showVerts }" @click="toggleVerts()">Vertices</button>
     </div>
     <div id="sectionBar" x-show="section">
-      <span class="rnglbl">Z cut</span>
+      <span class="rnglbl">Cut height</span>
       <input id="sectionZ" x-model.number="sectionZ" type="range" min="0" max="100" step="0.5">
       <span id="sectionZval" class="rnglbl" x-text="sectionZval"></span>
     </div>
-    <div id="status" x-text="statusMsg" :class="statusKind">Load a part to begin.</div>
+    <div id="status" x-show="statusMsg" x-text="statusMsg" :class="statusKind"></div>
+    <div id="mouseHint" x-show="hasPart" x-text="mouseHint"></div>
     <div id="drop" :class="{ hide: dropHide, hot: dropHot }"><div class="inner">
-      <div style="font-size:30px">⬇</div>
-      <div style="font-size:15px;margin-top:6px"><b>Drop a part here</b></div>
-      <div style="font-size:12px;margin-top:4px">.stl · .ply · .obj · .glb · .gltf</div>
+      <div class="arrow">⬇</div>
+      <div class="t1">Drop a 3D file here</div>
+      <div class="t2">.stl · .obj · .ply · .glb · .gltf</div>
     </div></div>
   </main>
+
+  <!-- ============================ PROJECTS DIALOG ============================ -->
+  <div id="projModal" class="modal" x-show="projOpen" @mousedown.self="projOpen=false">
+    <div class="dialog" role="dialog" aria-modal="true" aria-label="Projects">
+      <div class="dlghead">
+        <h2>Projects</h2>
+        <button class="ghost sm" @click="projOpen=false" aria-label="Close">✕</button>
+      </div>
+      <p class="hint" x-show="!hasServer">Projects are stored by the app's server. Open the app through the server (not as a file) to save and load them — or use a project file below.</p>
+
+      <div class="card" x-show="hasServer">
+        <h3 x-text="projectId ? 'This project' : 'Save this project'">Save this project</h3>
+        <div class="row">
+          <input x-ref="projName" x-model="projectName" type="text" placeholder="Give it a name…" class="grow" @keydown.enter="saveProject()" :disabled="!hasPart">
+          <button @click="saveProject()" :disabled="!hasPart">Save</button>
+          <button class="ghost" x-show="projectId" @click="saveNewProject()" :disabled="!hasPart" title="Keep the saved project and store this as a second one">Save as a copy</button>
+        </div>
+        <p class="hint" x-show="!hasPart">Nothing to save yet — load a part first.</p>
+        <p class="hint" id="projMsg" x-show="projMsg" x-text="projMsg" :class="{ err: projMsgErr }"></p>
+      </div>
+
+      <div x-show="hasServer">
+        <div class="row" x-show="projects.length>6"><input type="search" x-model="projFilter" placeholder="Search projects…" class="grow"></div>
+        <p class="hint" x-show="!projects.length">No saved projects yet.</p>
+        <div id="projList">
+          <template x-for="p in shownProjects" :key="p.id">
+            <div class="projrow" :class="{ cur: p.id===projectId }">
+              <button class="projopen" @click="openProject(p.id)" title="Open this project">
+                <b x-text="p.name"></b><span class="projmeta" x-text="projMeta(p)+(p.id===projectId?' · open now':'')"></span></button>
+              <button class="ghost sm" @click="deleteProject(p.id)" title="Delete this project">✕</button>
+            </div>
+          </template>
+        </div>
+        <p class="hint" x-show="projects.length && !shownProjects.length">No project matches “<span x-text="projFilter"></span>”.</p>
+      </div>
+
+      <div class="dlgfoot">
+        <span class="hint">Project as a file (.json):</span>
+        <button class="ghost sm" @click="saveCfg()" :disabled="!hasPart">Download</button>
+        <button class="ghost sm" @click="chooseCfg()">Open file…</button>
+        <input id="cfgInput" type="file" accept=".json" hidden @change="onCfgInput($event)">
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- =============================== MODULES =============================== -->
