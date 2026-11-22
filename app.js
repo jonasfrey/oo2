@@ -103,6 +103,11 @@ renderer.domElement.addEventListener('wheel', e=>{
   controls.update();
 }, {passive:false});
 
+/* true while a button is held down in the view (orbiting, painting, dragging a handle) — see followContent() */
+let viewPointerDown=false;
+renderer.domElement.addEventListener('pointerdown', ()=>{ viewPointerDown=true; }, true);
+for(const t of ['pointerup','pointercancel','blur']) window.addEventListener(t, ()=>{ viewPointerDown=false; }, true);
+
 /* ---- swapped-link gizmo: move/rotate a custom override within its own slot ---- */
 const xform = new TransformControls(camera, renderer.domElement);
 xform.visible=false; xform.enabled=false;
@@ -112,7 +117,7 @@ xform.addEventListener('dragging-changed', e=>{
   if(!e.value) commitGizmoAdjust();           // drag finished → persist + full recheck
 });
 xform.addEventListener('objectChange', liveGizmoAdjust);
-window.__debug={xform};   // TEMP: removed before commit
+window.__debug={xform,controls};   // TEMP: removed before commit
 
 /* ---- loop-sculpt direction gizmo + visibility group ---- */
 const lsXform = new TransformControls(camera, renderer.domElement);
@@ -159,6 +164,7 @@ function makePlateOutline(size){
 
 function resize(){
   const r=wrap.getBoundingClientRect();
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));   // browser zoom changes it; the canvas itself is stretched to the view by CSS
   renderer.setSize(r.width,r.height,false);
   camera.aspect=(r.width/r.height)||1; camera.updateProjectionMatrix();
 }
@@ -380,54 +386,75 @@ function updateMeshChips(){
   UI.cutMax=Math.max(1,+b.max.z.toFixed(1));     // the flatten-bottom slider spans the part's height
 }
 
-function frameCamera(){
-  S.baseGeo.computeBoundingSphere();
-  const r=S.baseGeo.boundingSphere.radius||50;
-  controls.target.set(0,0,r*0.3);
-  camera.position.set(r*2.2,-r*2.8,r*2.4);
-  camera.updateProjectionMatrix();
-}
-/* Joints step: fit the part AND its neighbour, seen from higher up — sliding the next link is an XY job */
-function frameJoints(){
-  S.baseGeo.computeBoundingBox();
-  const box=S.baseGeo.boundingBox.clone();
-  if(anchorsValid()) box.union(S.baseGeo.boundingBox.clone().applyMatrix4(relMate()));
-  else{ const s=box.getSize(new THREE.Vector3()); box.expandByVector(new THREE.Vector3(s.x*0.4,s.y*0.4,0)); }   // still stacked → leave room to slide it out
-  const c=box.getCenter(new THREE.Vector3()), r=(box.getSize(new THREE.Vector3()).length()/2)||50;
-  controls.target.copy(c);
-  camera.position.set(c.x+r*0.9, c.y-r*1.7, c.z+r*2.3);
-  camera.updateProjectionMatrix(); controls.update();
-}
-
-function contentBounds(){
+/* ------------------------------- CAMERA --------------------------------- *
+ * One rule for every page: the view looks at — and so orbits around — the middle of what
+ * is shown. That is not the origin: a file keeps its own coordinates, turning the part
+ * moves it, and a straight chain grows away from its first link.
+ * ------------------------------------------------------------------------ */
+/* the box around whatever the current page shows */
+function contentBox(){
   const box=new THREE.Box3();
-  if(S.lsChainGroup&&S.lsChainGroup.visible){ box.setFromObject(S.lsChainGroup); }
-  else if(S.chain&&S.chain.visible){ box.setFromObject(S.chain); }
+  if(S.lsChainGroup&&S.lsChainGroup.visible) box.setFromObject(S.lsChainGroup);
+  else if(S.chain&&S.chain.visible)          // link by link: the drawn geometry (both halves of a mirrored part), swapped links and their nudges
+    S.poses.forEach((p,i)=>box.union(worldAABB(linkWorldMatrix(i), S.overrides.get(i)?.geo || S.chain.geometry)));
   else if(S.baseGeo){
     S.baseGeo.computeBoundingBox(); box.copy(S.baseGeo.boundingBox); const d=decoWorldBox(); if(d) box.union(d);
     if(S.matePreview&&S.matePreview.visible) box.union(S.baseGeo.boundingBox.clone().applyMatrix4(relMate()));   // Joints page: the next link stays in frame
   }
-  else { box.set(new THREE.Vector3(-60,-60,0),new THREE.Vector3(60,60,60)); }
+  if(box.isEmpty()) box.set(new THREE.Vector3(-60,-60,0),new THREE.Vector3(60,60,60));   // nothing loaded yet → the middle of the plate
+  return box;
+}
+function contentBounds(){
+  const box=contentBox();
   return { center:box.getCenter(new THREE.Vector3()),
            radius:(box.getSize(new THREE.Vector3()).length()/2)||60 };
 }
-function setView(name){
+const VIEW_DIRS={                          // where the camera stands, seen from the content
+  iso   :[0.62,-0.78,0.66],                // front right, from above
+  joints:[0.9,-1.7,2.3],                   // higher up — sliding the next link is an XY job
+  top   :[0,-0.001, 1],                    // look down +Z (the tiny Y keeps Z-up from going degenerate)
+  bottom:[0, 0.001,-1],                    // look up   -Z
+  front :[0,-1, 0],                        // look along -Y
+  back  :[0, 1, 0],                        // look along +Y
+  right :[ 1, 0, 0],                       // look along +X
+  left  :[-1, 0, 0],                       // look along -X
+  side  :[ 1, 0, 0],                       // legacy alias for right
+};
+let viewFit=null;                          // middle + radius of what the view was last fitted to (see followContent)
+/* Look at the middle of the content from a named direction, far enough away that all of it is in view.
+   pad > 1 leaves air around it. */
+function frameContent(dirName='iso', pad=1.15){
   const {center,radius}=contentBounds();
-  const d=radius*3.0, e=radius*0.001;     // tiny offset keeps Z-up from going degenerate top/bottom
-  const off={
-    iso   :[d*0.62,-d*0.78,d*0.66],
-    top   :[0,-e, d],                      // look down  +Z
-    bottom:[0, e,-d],                      // look up    -Z
-    front :[0,-d, 0],                      // look along -Y
-    back  :[0, d, 0],                      // look along +Y
-    right :[ d, 0, 0],                     // look along +X
-    left  :[-d, 0, 0],                     // look along -X
-    side  :[ d, 0, 0],                     // legacy alias for right
-  }[name] || [d*0.62,-d*0.78,d*0.66];
+  const half=THREE.MathUtils.degToRad(camera.fov)/2;                       // the narrower side of the view decides the distance
+  const fit=radius/Math.sin(Math.min(half, Math.atan(Math.tan(half)*camera.aspect)));
+  const dir=new THREE.Vector3(...(VIEW_DIRS[dirName]||VIEW_DIRS.iso)).normalize();
+  controls.enableDamping=false; controls.update(); controls.enableDamping=true;   // drop what is left of the last drag's glide — a preset is exact
   controls.target.copy(center);
-  camera.position.set(center.x+off[0], center.y+off[1], center.z+off[2]);
-  camera.updateProjectionMatrix();
+  camera.position.copy(center).addScaledVector(dir, fit*pad);
   controls.update();
+  viewFit={center,radius};
+}
+function frameCamera(){ frameContent('iso', 1.4); }                        // the single part, with room for its handles
+/* Joints step: the part AND its neighbour; still stacked → leave room to slide the next link out */
+function frameJoints(){ frameContent('joints', anchorsValid() ? 1.15 : 1.6); }
+function setView(name){ frameContent(name); }
+
+/* The content changed (longer chain, other shape, turned part …): keep looking at its middle, from the
+   same angle and at the same relative zoom. Skipped
+   · on the Joints and Add-an-object pages and during any drag in the view — there the content moves
+     because the user is dragging it, and a camera that moves along would fight the drag;
+   · once the user has moved the view sideways (right-drag): their framing stands until the next preset. */
+function followContent(){
+  if(!viewFit || viewPointerDown) return;
+  const kind=viewKind(S.uiStep);
+  if(kind!=='part' && kind!=='chain') return;
+  if(controls.target.distanceTo(viewFit.center) > viewFit.radius*0.02) return;
+  const {center,radius}=contentBounds();
+  const off=camera.position.clone().sub(controls.target).multiplyScalar(radius/viewFit.radius);
+  controls.target.copy(center);
+  camera.position.copy(center).add(off);
+  controls.update();
+  viewFit={center,radius};
 }
 
 /* corner orientation cube — clicking a face snaps to that named view */
@@ -454,6 +481,7 @@ function bakeMatrix(m){
     if(S.deco.mesh){ S.deco.mesh.applyMatrix4(m); S.deco.mesh.updateMatrix(); }
     if(S.deco.linkPreFuse){ S.deco.linkPreFuse.applyMatrix4(m); S.deco.linkPreFuse.computeBoundingBox(); S.deco.linkMeshId=null; }
   }
+  followContent();                              // the part moved → the view keeps looking at its middle
 }
 
 /* ----- AUTO-ALIGN via PCA ----- */
@@ -510,13 +538,19 @@ function jacobiEigen(A){
   return {vectors:V, values:[a[0][0],a[1][1],a[2][2]]};
 }
 
-/* ----- 90° nudges ----- */
+/* ----- 90° nudges: on the spot — about the part's own middle, and back down onto the height it was resting at
+         (a plain rotation about a world axis swings a part on the plate sideways and half-way under it) ----- */
 function nudge(axis){
   if(!S.baseGeo) return;
+  S.baseGeo.computeBoundingBox();
+  const b=S.baseGeo.boundingBox, c=b.getCenter(new THREE.Vector3()), s=b.getSize(new THREE.Vector3());
   const m=new THREE.Matrix4();
   if(axis==='x')m.makeRotationX(Math.PI/2);
   if(axis==='y')m.makeRotationY(Math.PI/2);
   if(axis==='z')m.makeRotationZ(Math.PI/2);
+  const h = axis==='x' ? s.y : axis==='y' ? s.x : s.z;      // how tall the part is once turned
+  m.premultiply(new THREE.Matrix4().makeTranslation(c.x,c.y,b.min.z+h/2))
+   .multiply(new THREE.Matrix4().makeTranslation(-c.x,-c.y,-c.z));
   bakeMatrix(m); status('Rotated 90°.');
 }
 
@@ -885,6 +919,14 @@ function setPivot(axis,v){                                  // moves pin and hol
   if(!Number.isFinite(v)) return;
   const d=v-UI.pin[axis];
   UI.pin[axis]+=d; UI.hole[axis]+=d;
+}
+/* Build the chain the other way round: the same path, every link turned by half a turn. The link's two joint
+   points trade places — the same as sliding the next link to the exact opposite side on the Joints page.
+   Only in X / Y: a height step keeps climbing. (The pin / hole watchers rebuild the chain.) */
+function reverseChain(){
+  if(!S.baseGeo || !anchorsValid()) return;
+  const {x:px,y:py}=UI.pin, {x:hx,y:hy}=UI.hole;
+  UI.pin.x=hx; UI.pin.y=hy; UI.hole.x=px; UI.hole.y=py;
 }
 function partCenter(){
   if(!S.baseGeo.boundingBox) S.baseGeo.computeBoundingBox();
@@ -1527,6 +1569,7 @@ function regen(force){
   if(off){msg+=` ⚠ Exceeds ${plate} mm plate.`; if(!bad.size)kind='';}
   status(msg,kind);
   UI.s3nextDisabled=false;
+  followContent();                          // more links / another shape → the view stays on the middle of the chain
   if(UI.simAuto) autoFitReduction(false);   // keep the auto reduction target current with link count
   return {bad,off};
 }
@@ -2164,6 +2207,7 @@ function swapBaseGeometry(geo, {weld=true}={}){
   history?.clear();                                        // topology changed → old snapshots are invalid
   if(UI) UI.partHasColor=hasVColor(geo);
   updatePartEdges(); updateDebugViz(); updateMeshChips();
+  followContent();                                         // e.g. a cut or a fused object changed the part's extent
 }
 let _simplifierP=null;
 function getSimplifier(){
@@ -2452,7 +2496,8 @@ function openStep(id, force){
   if(id==='s2') UI.s2nextDisabled=!anchorsValid();   // an opened project sets the joint with the watchers muted
   const kind=viewKind(id), changed = force || kind!==viewKind(prev);
   if(kind==='chain'){
-    if(anchorsValid() && (changed || !S.poses.length)){ regen(); if(changed) setView('iso'); }
+    if(anchorsValid() && (changed || !S.poses.length)) regen();
+    if(changed) setView('iso');
     return;
   }
   updateMeshChips(); UI.chipCollide='';              // the HUD describes the single part again
@@ -3004,15 +3049,7 @@ function decoExit(){
   if(S.deco&&S.deco.mesh&&!S.deco.fused) decoFuse();
   decoSyncVisibility();
 }
-function decoFrame(){
-  if(!S.baseGeo) return;
-  S.baseGeo.computeBoundingBox();
-  const box=S.baseGeo.boundingBox.clone(), d=decoWorldBox(); if(d) box.union(d);
-  const c=box.getCenter(new THREE.Vector3()), r=(box.getSize(new THREE.Vector3()).length()/2)||50;
-  controls.target.copy(c);
-  camera.position.set(c.x+r*2.2,c.y-r*2.8,c.z+r*2.4);
-  camera.updateProjectionMatrix(); controls.update();
-}
+function decoFrame(){ if(S.baseGeo) frameContent('iso', 1.4); }   // the link and the object placed on it
 
 /* ---- fuse / unfuse ---- */
 function setColorCode(code){ if(colorEditor) colorEditor.setValue(code); else applyColorCode(code); }
@@ -3263,8 +3300,8 @@ function gizmoUnder(ev){
 function plateUnder(ev){
   pointerNDC(ev);
   if(!raycaster.ray.intersectPlane(_platePlane,_plateHit)) return null;
-  const {radius}=contentBounds();          // ignore wild hits when the plate is edge-on
-  if(Math.hypot(_plateHit.x,_plateHit.y) > radius*8) return null;
+  const {center,radius}=contentBounds();   // ignore wild hits when the plate is edge-on
+  if(Math.hypot(_plateHit.x-center.x,_plateHit.y-center.y) > radius*8) return null;
   return _plateHit;
 }
 wrap.addEventListener('pointerdown',ev=>{
@@ -3505,7 +3542,7 @@ function chainApp(){
     async goStep(id){
       if(this.openId===id) return;
       if(!this.hasPart){ if(id!=='s1') status('Load a part first — choose a file or drop it onto the view.','warn'); return; }
-      if(id==='s1'){ openStep('s1'); return; }
+      if(id==='s1'){ if(this.openId==='s2') status(''); openStep('s1'); return; }   // the Joints hint doesn't belong on the Part page
       if(this.isTool) openStep('s1');              // finish the brush / placement session before the part is prepared
       if(id==='s2'){ await this.s1Next(); return; }
       if(this.steps.s3.locked){                    // the chain hasn't been built yet
@@ -3630,6 +3667,7 @@ function chainApp(){
 
     /* ---- step 3 actions ---- */
     recheck(){ regen(true); },
+    reverseChain,
     pathReset(){ regeneratePathFromSliders(); },
     scaleReset(){ this.scalePreset('same'); },
     colorReset(){ this.colorPreset('alternate'); },

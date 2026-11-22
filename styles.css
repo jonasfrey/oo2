@@ -201,6 +201,9 @@
   /* ============================ VIEWPORT ============================ */
   #view{position:relative;min-width:0}
   #canvasWrap{position:absolute;inset:0}
+  /* the renderer only sets the canvas' pixel size; without this it is shown at that size, i.e. too
+     big or too small (and off-centre) at any browser zoom / display scaling other than 100% */
+  #canvasWrap canvas{display:block;width:100%;height:100%}
   #view.armed canvas{cursor:crosshair !important}
   #drop{position:absolute;inset:0;display:grid;place-items:center;z-index:5;
     background:rgba(8,11,16,.85);border:2px dashed var(--line);margin:18px;border-radius:16px}

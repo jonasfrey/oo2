@@ -530,6 +530,8 @@
             <button :class="{ on: shape==='straight' }" @click="shape='straight'">Straight</button>
             <button :class="{ on: shape==='spiral' }"   @click="shape='spiral'">Spiral</button>
           </div></div>
+        <div class="row"><label>Direction</label>
+          <button class="ghost sm" @click="reverseChain()" title="Build the chain the other way round: every link is turned half a turn (180°), on the same path">⇄ Reverse</button></div>
         <div class="srow"><label>Links</label><input x-model.number="count" type="range" min="2" max="400"><input x-model.number="count" type="number" min="2" max="5000"></div>
         <div x-show="shape==='spiral'">
           <div class="srow"><label>Start radius (mm)</label><input x-model.number="startR" type="range" min="0" max="150" step="1"><input x-model.number="startR" type="number" step="1"></div>
@@ -626,6 +628,8 @@
           <p class="hint" x-show="simEst">Detail: <span x-html="simEst"></span></p>
         </div>
 
+        <div class="row"><label>Chain direction</label>
+          <button class="ghost sm" @click="reverseChain()" title="Build the chain the other way round: every link is turned half a turn (180°), on the same path">⇄ Reverse</button></div>
         <div class="row"><label>File format</label>
           <select x-model="exportFmt">
             <option value="auto">Automatic (same as the part)</option>

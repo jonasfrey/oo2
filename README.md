@@ -13,10 +13,15 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
 2. **Joints** — the next link starts exactly on top of the part; move it along X / Y (arrows in the view, or the sliders)
    until the fit check says the two no longer touch. height step and pivot point are folded away.
 3. **Chain** — shape + number of links, with a status card (length, overlaps, plate fit).
+   **⇄ Reverse** builds the chain the other way round: same path, every link turned half a turn (also on the Export page).
    fine-tune joints, size / colour along the chain (preset buttons + code) and the custom path are folded away.
 4. **Export** — file format + download; swapping individual links is folded away.
 
 projects (open / save / delete, project file .json) are behind the **Projects** / **Save** buttons in the header.
+
+the 3d view always looks at — and orbits around — the middle of what the page shows (part, part + next link, chain),
+and keeps doing so while that changes (more links, other shape, turned part). right-drag moves the view away on purpose;
+Iso / Top / Front / Side or the cube bring it back.
 
 
 
