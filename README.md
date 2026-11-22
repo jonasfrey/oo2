@@ -11,7 +11,9 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
    everything else (fine rotation, flatten bottom, symmetry / half part, colours, file units) is folded away.
    the part is never reduced: it keeps every vertex of the file you loaded.
    **Flatten the bottom**: the cut plane starts through the middle of the part; drag its arrow up or down in the view (or use
-   the slider). what would be cut off is shown in red, the edge of the new bottom as a bright line.
+   the slider). what would be cut off is shown in red, the edge of the new bottom as a bright line. "Use this cut" stores the
+   height as a setting: the part itself stays whole (in the tools and in the saved project) — the links are cut when the chain
+   is built, and set down flat on the plate.
    the optional extras live here too: Sculpt, Relief from an image, Morph along the chain, Add an object.
    a morph point can be **mirrored** ("Mirror to the other side"): it then acts a second time across the part's mirror plane —
    the detected symmetry line (found on the first tick), or a plane set by hand; on a half part its own mirror plane.

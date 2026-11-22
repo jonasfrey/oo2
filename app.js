@@ -20,7 +20,7 @@ import { HeightmapEditor }        from './heightmap/HeightmapEditor.js';
 import { EditHistory }            from './EditHistory.js';
 import { ViewCube }               from './ViewCube.js';
 import { importDecoration, simplifyColored, weldWithColors } from './deco/DecoImport.js';
-import { fuseGeometries }         from './deco/Fuse.js';
+import { fuseGeometries, solidWithColor } from './deco/Fuse.js';
 import { TransformGizmo }         from './deco/TransformGizmo.js';
 
 // three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
@@ -257,7 +257,7 @@ const S = {
   scales:[],             // per-link scale actually used (for status/debug)
   partEdges:null,        // LineSegments outline of the single part (x-ray)
   matePreview:null,      // ghost of the neighbouring link shown in step 2
-  geoPreCut:null,        // pre-flatten copy of baseGeo, for "undo cut"
+  cutGeo:null, cutKey:'',// the part with its bottom cut off, as the links of the chain use it (see chainPartGeo) — and what it was made from
   cutViz:null,           // the flatten-bottom preview: sheet at the cut height, what is cut off in red, the cut line
   overrides:new Map(),   // link index → {geo,name}: that slot uses a custom model
   overrideGroup:null,    // THREE.Group of the custom-link meshes
@@ -372,9 +372,8 @@ function setBaseGeometry(geo, opts={}){
 
   if (S.partMesh){ scene.remove(S.partMesh); S.partMesh.geometry.dispose(); }
   if (S.matePreview){ scene.remove(S.matePreview); S.matePreview.material.dispose(); S.matePreview=null; }
-  if (S.geoPreCut){ S.geoPreCut.dispose(); S.geoPreCut=null; }         // and any pending "undo cut" for the old part
-  clearCutPreview();
-  if (UI){ UI.hasCutUndo=false; UI.cutHeight=0; }
+  if (UI){ UI.cutOn=false; UI.cutHeight=0; }                           // a cut belonged to the old part
+  clearCutPreview(); dropCutGeo();
   for (const i of [...S.overrides.keys()]) clearOverride(i);           // and any per-link swaps (slots no longer valid)
   if (S.overrideGroup){ scene.remove(S.overrideGroup); S.overrideGroup.traverse(o=>o.material&&o.material.dispose()); S.overrideGroup=null; }
   S.alignMatrix.identity();                         // fresh part → its own alignment starts from scratch
@@ -779,10 +778,14 @@ function layFlat(){
 
 /* ----- FLATTEN BOTTOM: slice off everything below a Z height, cap the new floor ----- */
 const CUT_COL = { off:0xff4d4d, line:0xfff2a8 };
+/* stop moving the plane; a cut that is in use stays on show on the Part page */
 function clearCutPreview(){
+  if(!UI) return;
+  UI.cutPreview=false; updateCutPreview();
+}
+function hideCutViz(){
   if(S.cutViz){ scene.remove(S.cutViz); S.cutViz.traverse(o=>{ if(o!==S.cutViz.userData.off) o.geometry?.dispose(); o.material?.dispose(); }); S.cutViz=null; }
   cutXform.detach(); cutXform.visible=false; cutXform.enabled=false;
-  if(UI) UI.cutPreview=false;
 }
 /* where the plane z = h cuts the part: one line segment per crossed triangle, as [x,y, x,y, …] */
 function cutSegments(h){
@@ -802,12 +805,14 @@ function cutSegments(h){
   });
   return out;
 }
-/* The cut, before it is made: a sheet at the cut height, everything below it — what gets cut off — in red, and the
-   line where the sheet goes through the part (the edge of the new bottom) as a bright band. */
+/* The cut on the Part page: a sheet at the cut height, everything below it — what the links lose — in red, and the
+   line where the sheet goes through the part (the edge of the new bottom) as a bright band. Shown while the plane is
+   being moved (with its arrow), and for as long as a cut is in use. The part itself is never cut. */
 function updateCutPreview(){
-  if(!UI.cutPreview || !S.baseGeo) return;
+  const edit=UI.cutPreview;
+  if(!S.baseGeo || S.uiStep!=='s1' || !(edit || UI.cutOn)){ hideCutViz(); return; }
   S.baseGeo.computeBoundingBox();
-  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3()), h=UI.cutHeight;
+  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3()), h=edit?UI.cutHeight:UI.cutAt;
   if(!S.cutViz){
     const g=S.cutViz=new THREE.Group();
     const sheet=new THREE.Mesh(new THREE.PlaneGeometry(1,1),
@@ -825,9 +830,11 @@ function updateCutPreview(){
     line.renderOrder=999;
     g.add(sheet,off,band,line); g.userData={sheet,off,band,line};
     scene.add(g);
-    cutXform.attach(cutHandle); cutXform.visible=true; cutXform.enabled=true;
   }
+  if(edit && !cutXform.object){ cutXform.attach(cutHandle); cutXform.visible=true; cutXform.enabled=true; }
+  if(!edit && cutXform.object){ cutXform.detach(); cutXform.visible=false; cutXform.enabled=false; }
   const {sheet,off,band,line}=S.cutViz.userData;
+  if(off.geometry!==S.baseGeo) off.geometry=S.baseGeo;
   const cx=(b.min.x+b.max.x)/2, cy=(b.min.y+b.max.y)/2;
   sheet.scale.set(s.x*1.4+10, s.y*1.4+10, 1);
   sheet.position.set(cx,cy,h);
@@ -850,40 +857,89 @@ function startCutPreview(center){
   if(!S.baseGeo || S.uiStep!=='s1') return;
   S.baseGeo.computeBoundingBox();
   const b=S.baseGeo.boundingBox;
-  if(center || !(UI.cutHeight>b.min.z && UI.cutHeight<b.max.z)) UI.cutHeight=+((b.min.z+b.max.z)/2).toFixed(1);
+  if(UI.cutOn) UI.cutHeight=UI.cutAt;                                  // a cut in use: that is where the plane is
+  else if(center || !(UI.cutHeight>b.min.z && UI.cutHeight<b.max.z)) UI.cutHeight=+((b.min.z+b.max.z)/2).toFixed(1);
   UI.cutPreview=true; updateCutPreview();
   status('Drag the blue arrow up or down: everything shown in red is cut off.');
 }
-function cutFlatBottom(){
+/* "Use this cut" / "Remove the cut": the height is a setting of the project — the links of the chain are cut there,
+   the part keeps its shape (and so does the mesh saved with the project). */
+async function applyCut(){
   if(!S.baseGeo) return;
-  const cutZ=UI.cutHeight;
+  const z=UI.cutHeight;
   S.baseGeo.computeBoundingBox();
   const b=S.baseGeo.boundingBox;
-  if(!(cutZ>b.min.z)){ status('The cut height is at the very bottom — nothing would be cut off.','warn'); return; }
-  if(cutZ>=b.max.z){ status('Cut height is at or above the part — nothing would be left.','err'); return; }
-  if(!S.geoPreCut) S.geoPreCut=S.baseGeo.clone();
-  const size=b.getSize(new THREE.Vector3()), c=b.getCenter(new THREE.Vector3());
-  const boxH=(cutZ-b.min.z)+10;                      // reaches well below the part, top face = cutZ
-  const boxGeo=new THREE.BoxGeometry(size.x*3+20,size.y*3+20,boxH);
-  const brushA=new Brush(S.baseGeo); brushA.updateMatrixWorld();
-  const brushB=new Brush(boxGeo);
-  brushB.position.set(c.x,c.y,cutZ-boxH/2); brushB.updateMatrixWorld();
-  const evaluator=new Evaluator(); evaluator.attributes=['position','normal'];   // our geometries carry no uvs
-  const result=evaluator.evaluate(brushA,brushB,SUBTRACTION);
-  const g=result.geometry;
-  g.computeBoundingBox();
-  g.translate(0,0,-g.boundingBox.min.z);             // rebase the new floor to z=0
-  swapBaseGeometry(g);
-  S.meshDirty=true; clearCutPreview(); UI.cutHeight=0; UI.hasCutUndo=true;
-  regen(); frameCamera();
-  status(`Cut flat — removed ${(cutZ-b.min.z).toFixed(1)} mm from the bottom.`,'ok');
+  if(!(z>b.min.z)){ status('The cut height is at the very bottom — nothing would be cut off.','warn'); return; }
+  if(z>=b.max.z){ status('Cut height is at or above the part — nothing would be left.','err'); return; }
+  UI.cutAt=z; UI.cutOn=true;
+  status('Cutting…'); await new Promise(r=>setTimeout(r,10));     // let the status line repaint
+  if(!cutChanged()){ UI.cutOn=false; cutChanged(); status('This part could not be cut at that height.','err'); return; }
+  status(`The links are cut ${(z-b.min.z).toFixed(1)} mm above the bottom. The part itself stays as it is.`,'ok');
 }
-function undoCutFlat(){
-  if(!S.geoPreCut) return;
-  swapBaseGeometry(S.geoPreCut.clone());
-  S.geoPreCut.dispose(); S.geoPreCut=null; UI.hasCutUndo=false;
-  S.meshDirty=true; regen(); frameCamera();
-  status('Cut undone.','ok');
+function removeCut(){
+  if(!UI.cutOn) return;
+  UI.cutOn=false; cutChanged();
+  status('Cut removed — the links are whole again.','ok');
+}
+/* the cut was set, moved or removed → everything made from the part for the chain is made again; false: the cut failed */
+function cutChanged(){
+  dropCutGeo();
+  const ok = !UI.cutOn || chainPartGeo()!==S.baseGeo;
+  updateMirroredBase();
+  if(S.poses.length) regen();
+  updateCutPreview();
+  return ok;
+}
+function dropCutGeo(){
+  if(S.cutGeo){ S.cutGeo.disposeBoundsTree?.(); S.cutGeo.dispose(); }
+  S.cutGeo=null; S.cutKey='';
+}
+/* What the links of the chain are made of: the part — with its bottom cut off where "Flatten the bottom" says so.
+   Made when first needed and again when the part or the height has changed. */
+function chainPartGeo(){
+  if(!UI || !UI.cutOn || !S.baseGeo) return S.baseGeo;
+  const pos=S.baseGeo.attributes.position, col=S.baseGeo.attributes.color;
+  const key=[S.baseGeo.uuid, pos.version, col?col.version:'', UI.cutAt].join('|');
+  if(S.cutKey!==key){ dropCutGeo(); S.cutKey=key; S.cutGeo=cutPart(S.baseGeo, UI.cutAt); }
+  return S.cutGeo || S.baseGeo;                       // null: nothing to cut at that height, or the cut failed
+}
+/* how far the cut part was moved down to sit on the plate again (things placed on the part — morph points — go along) */
+function cutShift(){ return (UI && UI.cutOn && chainPartGeo()===S.cutGeo && S.cutGeo) ? S.cutGeo.userData.shift : 0; }
+/* slice everything below z off (boolean with a box), close the new bottom, and set it down on z = 0 */
+function cutPart(src, cutZ){
+  src.computeBoundingBox();
+  const b=src.boundingBox;
+  if(!(cutZ>b.min.z && cutZ<b.max.z)) return null;
+  const size=b.getSize(new THREE.Vector3()), c=b.getCenter(new THREE.Vector3()), vc=hasVColor(src);
+  const boxH=(cutZ-b.min.z)+10;                      // reaches well below the part, top face = cutZ
+  let boxGeo=new THREE.BoxGeometry(size.x*3+20,size.y*3+20,boxH), part=src;
+  if(vc){                                            // a coloured part: the new bottom takes the colour most common just above the cut
+    const ca=src.getAttribute('color'), pa=src.getAttribute('position'), band=Math.max(0.5,size.z*0.08), hist=new Map();
+    for(const lim of [cutZ+band, Infinity]){
+      for(let i=0;i<pa.count;i++){ const z=pa.getZ(i); if(z<cutZ||z>lim) continue;
+        const k=colourKey(ca.getX(i),ca.getY(i),ca.getZ(i)), e=hist.get(k); if(e) e[3]++; else hist.set(k,[ca.getX(i),ca.getY(i),ca.getZ(i),1]); }
+      if(hist.size) break;
+    }
+    const top=[...hist.values()].sort((x,y)=>y[3]-x[3])[0]||[1,1,1];
+    part=solidWithColor(src, WHITE);
+    const plain=boxGeo; boxGeo=solidWithColor(plain, new THREE.Color(top[0],top[1],top[2])); plain.dispose();
+  }
+  try{
+    const brushA=new Brush(part); brushA.updateMatrixWorld();
+    const brushB=new Brush(boxGeo);
+    brushB.position.set(c.x,c.y,cutZ-boxH/2); brushB.updateMatrixWorld();
+    const evaluator=new Evaluator(); evaluator.attributes=vc?['position','normal','color']:['position','normal'];   // our geometries carry no uvs
+    const raw=evaluator.evaluate(brushA,brushB,SUBTRACTION).geometry;
+    raw.computeBoundingBox();
+    if(!raw.attributes.position.count || !isFinite(raw.boundingBox.min.z)){ raw.dispose(); return null; }
+    const shift=raw.boundingBox.min.z;
+    raw.translate(0,0,-shift);                         // the new floor sits on z = 0
+    const g=weldByPosition(raw); raw.dispose();
+    g.computeBoundingBox(); g.computeBoundingSphere();
+    g.userData.shift=shift;
+    return g;
+  }catch(e){ console.warn('cutting the part failed:',e); return null; }
+  finally{ boxGeo.dispose(); if(part!==src) part.dispose(); }
 }
 
 function centerPart(){
@@ -1520,7 +1576,7 @@ function buildMirroredGeo(srcGeo){
 
 function updateMirroredBase(){
   if(S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
-  if(UI&&UI.mirrorEnabled&&S.baseGeo) S.mirroredBaseGeo=buildMirroredGeo(S.baseGeo);
+  if(UI&&UI.mirrorEnabled&&S.baseGeo) S.mirroredBaseGeo=buildMirroredGeo(chainPartGeo());
 }
 let mirrorRegenTimer=null;
 function debounceMirrorRegen(){
@@ -1545,7 +1601,7 @@ function buildLSChainGroup(poses){
     const nor=N>1?i/(N-1):0;
     // use cached mirrored base if mirror is enabled (much faster than rebuilding per link)
     const geo=(UI&&UI.mirrorEnabled&&S.mirroredBaseGeo)?S.mirroredBaseGeo.clone():linkGeom(i).clone();
-    applyLSDeform(geo,i,nor);
+    applyLSDeform(geo,i,nor,cutShift());
     const base=vc?WHITE:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR);
     linkPaint(i,N,base,vc);            // writes result into _tmpCol
     const mat=new THREE.MeshStandardMaterial({color:_tmpCol.clone(),metalness:0.05,roughness:0.7});
@@ -1573,7 +1629,7 @@ function recolorLSChain(bad){
 function renderChain(poses){
   if(S.chain){scene.remove(S.chain);S.chain.dispose();}
   disposeLSChainGroup();
-  const chainGeo=(UI&&UI.mirrorEnabled&&S.mirroredBaseGeo)?S.mirroredBaseGeo:S.baseGeo;
+  const chainGeo=(UI&&UI.mirrorEnabled&&S.mirroredBaseGeo)?S.mirroredBaseGeo:chainPartGeo();
   const mat=partMaterial(chainGeo,{roughness:.7});
   if(hasVColor(chainGeo)) installSwapShader(mat);
   S.chain=new THREE.InstancedMesh(chainGeo, mat, poses.length);
@@ -1756,7 +1812,7 @@ async function exportChain(){
       src=lite.get(src);
     }
     let g=src.clone();
-    if(S.lsNodes.length){ const nor=S.poses.length>1?i/(S.poses.length-1):0; applyLSDeform(g,i,nor); }
+    if(S.lsNodes.length){ const nor=S.poses.length>1?i/(S.poses.length-1):0; applyLSDeform(g,i,nor,S.overrides.has(i)?0:cutShift()); }
     g.applyMatrix4(linkWorldMatrix(i));      // bake world matrix (incl. any gizmo nudge) → separate solid
     for(const a of Object.keys(g.attributes)) if(a!=='position'&&a!=='normal'&&!(keepColor&&a==='color')) g.deleteAttribute(a);
     if(keepColor && !g.getAttribute('color'))   // an uncolored override → white-fill so the merge's attrs match
@@ -2026,6 +2082,7 @@ function gatherConfig(opts={}){
     mirrorPlane:{manual:UI.sculptManual,axis:UI.sculptAxis,offset:UI.sculptOffset},   // set by hand (Sculpt / Morph); the detected lines are symPlanes
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
     colorShades:UI.colorShades, purify:UI.purify,   // a coloured part is re-quantized with these on load
+    cut: UI.cutOn ? UI.cutAt : null,                // "Flatten the bottom": the links are cut at this height (the mesh is the whole part)
   };
   if(opts.inlineGeometry && S.baseGeo){
     cfg.geometry=Array.from(S.baseGeo.attributes.position.array);
@@ -2089,6 +2146,8 @@ async function applyConfig(cfg){
       S.meshId=null;
     }
     S.meshDirty=false;                          // whatever we just loaded is the current saved mesh
+    if(Number.isFinite(cfg.cut)){ UI.cutAt=cfg.cut; UI.cutOn=true; } else UI.cutOn=false;
+    dropCutGeo();
     if(cfg.pin) Object.assign(UI.pin,cfg.pin);
     if(cfg.hole) Object.assign(UI.hole,cfg.hole);
     S.partX=cfg.partX||0; UI.partX=S.partX;
@@ -2447,7 +2506,7 @@ function fmtBytes(b){ return b>=1048576 ? (b/1048576).toFixed(1)+' MB' : Math.ma
 /* the geometry link i is exported from: a swapped-in model, or the part (the full, mirrored one for a half part) */
 function exportSource(i){
   const o=S.overrides.get(i);
-  return o ? o.geo : (UI.mirrorEnabled&&S.mirroredBaseGeo) ? S.mirroredBaseGeo : S.baseGeo;
+  return o ? o.geo : (UI.mirrorEnabled&&S.mirroredBaseGeo) ? S.mirroredBaseGeo : chainPartGeo();
 }
 function exportVertCap(){ return UI.exportReduce ? Math.max(50, Math.round(+UI.exportMaxVerts)||CONST.MAX_VERTS_PER_LINK) : 0; }   // 0 = full detail
 /* the colours the file will have (Export page): the legend under "At most N colours" */
@@ -2608,7 +2667,7 @@ async function decimateToVertexTarget(src,target){
  * ======================================================================== */
 function linkGeom(i){
   const o=S.overrides.get(i);
-  const g=o?o.geo:S.baseGeo;
+  const g=o?o.geo:chainPartGeo();
   if(!g.boundsTree) g.boundsTree=new MeshBVH(g);
   if(!g.boundingBox) g.computeBoundingBox();
   return g;
@@ -2776,7 +2835,8 @@ function compileLSFn(code){
   catch(e){ return null; }
 }
 
-function applyLSDeform(geo, n_it, n_it_nor){
+/* dz: how far this geometry sits below the part the points were placed on (a link with its bottom cut off, see cutShift) */
+function applyLSDeform(geo, n_it, n_it_nor, dz=0){
   if(!S.lsNodes.length) return;
   const nodes=lsActingNodes();
   const pos=geo.getAttribute('position');
@@ -2784,7 +2844,7 @@ function applyLSDeform(geo, n_it, n_it_nor){
   const n=pos.count;
   const v=new THREE.Vector3(), d=new THREE.Vector3();
   for(let vi=0;vi<n;vi++){
-    v.fromBufferAttribute(pos,vi);
+    v.fromBufferAttribute(pos,vi); v.z+=dz;
     for(const node of nodes){
       const dist=v.distanceTo(node.pos);
       if(dist>node.radius) continue;
@@ -3490,6 +3550,7 @@ function showStepView(id){
   if(wasDeco   && id!=='deco') decoExit();      // leaving with a placed object fuses it into the link
   if(id!=='s1') clearCutPreview();              // the flatten-bottom plane belongs to the Part page only
   else if(UI && UI.cutFold && !UI.cutPreview) startCutPreview(false);   // … and is back when the page is, if its section is open
+  else if(UI) updateCutPreview();               // a cut in use shows on the Part page
   if(id==='sculpt'  && !sculpt.active && S.baseGeo) enterSculpt();
   if(id==='height'  && !disp.active  && S.baseGeo) enterHeight();
   if(id==='lsculpt' && S.baseGeo) lsEnter();
@@ -3684,7 +3745,8 @@ function chainApp(){
     symOut:'',
     dbgOut:'Load a part to see its vertex / triangle count.',
     showVerts:false, showWire:false,
-    cutHeight:0, cutMin:0, cutMax:20, cutPreview:false, cutFold:false, hasCutUndo:false,
+    cutHeight:0, cutMin:0, cutMax:20, cutPreview:false, cutFold:false,
+    cutOn:false, cutAt:0,              // a cut is in use: the links of the chain lose everything below cutAt (the part does not)
     s1nextDisabled:true,
     /* ----- sculpt (optional step) ----- */
     sculptTool:'draw', sculptRadius:8, sculptStrength:0.5,
@@ -3914,7 +3976,7 @@ function chainApp(){
     toggleSym(){ S.symVisible=!S.symVisible; if(S.symGroup)S.symGroup.visible=S.symVisible; },
     toggleVerts(){ this.showVerts=!this.showVerts; updateDebugViz(); },
     toggleWire(){ this.showWire=!this.showWire; updateDebugViz(); },
-    cutFlatBottom, undoCutFlat,
+    applyCut, removeCut,
     get exportKeepsColour(){ return this.chainColoured && this.exportFmtNow!=='stl'; },
     get exportColourNote(){
       const n=this.exportPalette.length, all=this.exportFound;
@@ -3922,6 +3984,7 @@ function chainApp(){
     },
     onCutFold(open){ this.cutFold=open; if(open) startCutPreview(true); else clearCutPreview(); },
     get cutInfo(){ const off=this.cutHeight-this.cutMin, all=this.cutMax-this.cutMin; return `Cuts off the lowest ${off.toFixed(1)} mm of ${all.toFixed(1)} mm — ${Math.round(100*off/all)} % of the height.`; },
+    get cutSummary(){ return this.cutOn ? `links cut ${(this.cutAt-this.cutMin).toFixed(1)} mm up` : ''; },
 
     /* ---- loop sculpt actions ---- */
     mirrorSnap(){

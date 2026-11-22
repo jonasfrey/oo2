@@ -111,15 +111,17 @@
           </details>
 
           <details class="fold" @toggle="onCutFold($event.target.open)">
-            <summary>Flatten the bottom</summary>
+            <summary>Flatten the bottom <span class="sum" x-text="cutSummary"></span></summary>
             <div class="foldbody">
-              <p class="hint">Rounded feet or a stray bump underneath? Slice the part off at a height, so it really sits flat. <b>Drag the blue arrow</b> in the view, or use the slider: everything shown in <span style="color:#ff6b6b">red</span> is cut away, the bright line is the edge of the new bottom.</p>
+              <p class="hint">Rounded feet or a stray bump underneath? Slice the links off at a height, so they really sit flat. <b>Drag the blue arrow</b> in the view, or use the slider: everything shown in <span style="color:#ff6b6b">red</span> is cut away, the bright line is the edge of the new bottom.</p>
               <div class="srow"><label>Cut height (mm)</label><input x-model.number="cutHeight" type="range" :min="cutMin" :max="cutMax" step="0.1"><input x-model.number="cutHeight" type="number" step="0.1" :min="cutMin" :max="cutMax"></div>
               <p class="hint" x-show="cutPreview" x-text="cutInfo"></p>
               <div class="btnrow">
-                <button class="sm" @click="cutFlatBottom()" :disabled="!cutPreview || !(cutHeight>cutMin && cutHeight<cutMax)">Cut flat</button>
-                <button class="ghost sm" @click="undoCutFlat()" :disabled="!hasCutUndo">Undo cut</button>
+                <button class="sm" @click="applyCut()" :disabled="!cutPreview || !(cutHeight>cutMin && cutHeight<cutMax) || (cutOn && cutAt===cutHeight)" x-text="cutOn ? 'Move the cut here' : 'Use this cut'">Use this cut</button>
+                <button class="ghost sm" @click="removeCut()" :disabled="!cutOn">Remove the cut</button>
               </div>
+              <p class="verdict ok" x-show="cutOn">✓ The links are cut <span x-text="(cutAt-cutMin).toFixed(1)"></span> mm above the bottom.</p>
+              <p class="hint">The part itself is not changed — here, in the tools and in the saved project it stays whole. The cut is made when the chain is built.</p>
             </div>
           </details>
 
