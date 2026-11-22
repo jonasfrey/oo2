@@ -174,7 +174,7 @@
             <button class="tool" @click="openTool('height')">
               <span class="ico">▲</span><span class="tt"><b>Relief from an image</b><small>Paint a picture onto the part as raised relief</small></span></button>
             <button class="tool" @click="openTool('lsculpt')">
-              <span class="ico">↻</span><span class="tt"><b>Morph along the chain</b><small>Let the links change shape from first to last</small></span>
+              <span class="ico">↻</span><span class="tt"><b>Morph along the chain</b><small>Pull, inflate or pinch a spot — a different amount on each link</small></span>
               <span class="badge" x-show="lsNodes.length" x-text="lsNodes.length"></span></button>
             <button class="tool" @click="openTool('deco')">
               <span class="ico">✿</span><span class="tt"><b>Add an object</b><small>Fuse a second model — a duck, a chilli — onto every link</small></span>
@@ -187,6 +187,7 @@
       <section class="page" id="sculpt" x-show="openId==='sculpt'">
         <div class="pagehead"><h2><span class="crumb" @click="closeTool()">Part ›</span> Sculpt</h2></div>
         <p class="lead"><b>Drag</b> on the part to sculpt. Hold <kbd>Alt</kbd> and drag to rotate the view.</p>
+        <p class="hint">A stroke changes every link in the same way. For a pull, bulge or pinch that is different on each link — growing along the chain, or by a formula — use <a class="link" @click="openTool('lsculpt')">Morph along the chain</a>.</p>
 
         <div class="row"><label>Brush</label>
           <div class="seg">
