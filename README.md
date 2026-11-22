@@ -15,6 +15,7 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
    height as a setting: the part itself stays whole (in the tools and in the saved project) — the links are cut when the chain
    is built, and set down flat on the plate.
    the optional extras live here too: Sculpt, Relief from an image, Morph along the chain, Add an object.
+   a morph point has one handle for everything: arrows move it, rings turn its arrow, the ball in the middle moves it freely.
    a morph point can be **mirrored** ("Mirror to the other side"): it then acts a second time across the part's mirror plane —
    the detected symmetry line (found on the first tick), or a plane set by hand; on a half part its own mirror plane.
 2. **Joints** — the next link starts exactly on top of the part; move it along X / Y (arrows in the view, or the sliders)

@@ -16,6 +16,9 @@ import * as THREE from 'three';
  * plate axes (per-axis scale cubes are hidden there — a world-axis stretch of a
  * rotated object would be a shear, which a position/rotation/scale can't hold).
  *
+ * `handles` picks the kinds to build ('move', 'rotate', 'scale', 'free', 'uniform'; default: all) — a thing that can
+ * only be moved and turned gets a gizmo without the scale handles.
+ *
  * Interaction contract matches the sculpt/heightmap controllers: a capture-phase
  * pointerdown on the canvas disables OrbitControls before it sees the event, so
  * grabbing a handle never also orbits the camera. Call update() once per frame.
@@ -48,7 +51,8 @@ function ringToAxis(geo, axis) {
 }
 
 export class TransformGizmo {
-  constructor({ scene, camera, renderer, controls }) {
+  constructor({ scene, camera, renderer, controls, handles = null }) {
+    this.kinds = handles ? new Set(handles) : null;   // null: every kind
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -137,6 +141,7 @@ export class TransformGizmo {
 
   // ---- construction --------------------------------------------------------
   _add(kind, axis, color, visuals, pickerGeo, parent = this.root) {
+    if (this.kinds && !this.kinds.has(kind)) { for (const m of visuals) { m.geometry.dispose(); m.material.dispose(); } pickerGeo.dispose(); return; }
     const group = new THREE.Group();
     for (const m of visuals) { m.renderOrder = 1000; group.add(m); }
     const picker = new THREE.Mesh(pickerGeo, PICK_MAT);

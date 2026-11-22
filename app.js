@@ -130,12 +130,6 @@ xform.addEventListener('objectChange', liveGizmoAdjust);
 window.__debug={xform,controls};   // TEMP: removed before commit
 
 /* ---- loop-sculpt direction gizmo + visibility group ---- */
-const lsXform = new TransformControls(camera, renderer.domElement);
-lsXform.visible = false; lsXform.enabled = false;
-lsXform.setMode('rotate');
-scene.add(lsXform);
-lsXform.addEventListener('dragging-changed', e => { controls.enabled = !e.value; });
-lsXform.addEventListener('objectChange', lsOnGizmoChange);
 const lsGroup = new THREE.Group(); lsGroup.visible = false; scene.add(lsGroup);
 const lsTwinGroup = new THREE.Group(); lsGroup.add(lsTwinGroup);   // the mirrored twins of morph points (see lsSyncTwins)
 
@@ -169,6 +163,10 @@ cutXform.addEventListener('objectChange', ()=>{
 
 /* ---- decorate step: combined move/rotate/scale gizmo for the placed object ---- */
 const decoGizmo = new TransformGizmo({ scene, camera, renderer, controls });
+/* ---- morph points: the same kind of gizmo, without the scale handles — arrows move the point, rings turn its arrow ---- */
+const lsGizmo = new TransformGizmo({ scene, camera, renderer, controls, handles:['move','rotate','free'] });
+lsGizmo.space='world'; lsGizmo.size=0.18;
+lsGizmo.onChange=()=>lsOnGizmoChange();
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202830, 1.1));
 const dir = new THREE.DirectionalLight(0xffffff, 1.4); dir.position.set(80,-120,200); scene.add(dir);
@@ -241,7 +239,7 @@ renderer.domElement.addEventListener('webglcontextrestored', ()=>{
   if(UI){ UI.glLost=''; status('The 3D view is back.','ok'); }
 });
 
-(function loop(){requestAnimationFrame(loop);controls.update();decoGizmo.update();renderer.render(scene,camera);viewCube&&viewCube.update();})();
+(function loop(){requestAnimationFrame(loop);controls.update();decoGizmo.update();lsGizmo.update();renderer.render(scene,camera);viewCube&&viewCube.update();})();
 
 /* ================================ STATE ================================== */
 /* Engine state — Three.js object refs + non-reactive bookkeeping. UI-bound
@@ -3116,11 +3114,10 @@ function lsSelectNode(idx){
   }
   lsSyncTwins();
   if(idx<0||idx>=S.lsNodes.length){
-    lsXform.detach(); lsXform.visible=false; lsXform.enabled=false; return;
+    lsGizmo.detach(); return;
   }
   const node=S.lsNodes[idx];
-  lsXform.setMode(UI ? UI.lsGizmoMode : 'rotate');
-  lsXform.attach(node.pivot); lsXform.visible=true; lsXform.enabled=true;
+  lsGizmo.attach(node.pivot);
   if(UI){
     UI.lsIntensity=node.intensity; UI.lsRadius=node.radius;
     UI.lsMode=node.mode; UI.lsFalloff=node.falloff; UI.lsCode=node.code; UI.lsMirror=node.mirror;
@@ -3216,7 +3213,7 @@ function lsRevertPreview(){
 
 function lsEnter(){
   lsGroup.visible=true;
-  lsXform.visible=S.lsActiveNodeIdx>=0; lsXform.enabled=S.lsActiveNodeIdx>=0;
+  lsGizmo.enable();                                    // shows on the selected point (lsSelectNode attaches it)
   lsSyncTwins(); lsPreviewUpdate();
   status(S.lsNodes.length ? 'Morph: select a point to change it, or add another one.'
                           : 'Morph: press “Add a point”, then click the part where it should change.');
@@ -3224,7 +3221,7 @@ function lsEnter(){
 
 function lsExit(){
   lsGroup.visible=false;
-  lsXform.detach(); lsXform.visible=false; lsXform.enabled=false;
+  lsGizmo.disable();
   lsRevertPreview(); status('');
   if(S.poses.length) regen();   // rebuild the chain with updated loop sculpt params
 }
@@ -3236,7 +3233,7 @@ function lsClearAll(){
     nd.sphereViz.geometry.dispose(); nd.sphereViz.material.dispose();
   }
   S.lsNodes=[]; S.lsActiveNodeIdx=-1;
-  lsXform.detach(); lsXform.visible=false; lsXform.enabled=false;
+  lsGizmo.detach();
   if(UI){ UI.lsActiveNode=-1; UI.lsNodes=[]; }
   lsSyncTwins(); lsRevertPreview();
 }
@@ -3899,7 +3896,6 @@ function chainApp(){
     lsMode:'push', lsFalloff:'smooth', lsMirror:false, lsMirrorInfo:'',
     lsCode:'return n_it_nor;',
     lsPreviewT:0.5,
-    lsGizmoMode:'rotate',
     /* ----- mirror half ----- */
     mirrorEnabled:false, mirrorAxis:'x', mirrorOffset:0,
     mirrorDetectOut:'',
@@ -4140,7 +4136,6 @@ function chainApp(){
       this.mirrorOffset=+(Math.abs(mn)<=Math.abs(mx)?mn:mx).toFixed(3);
     },
     lsPickMode(){ setArm(this.arm==='lsPick'?null:'lsPick'); },
-    lsSetGizmoMode(m){ this.lsGizmoMode=m; lsXform.setMode(m); },
     lsSelectNode(idx){ lsSelectNode(idx); },
     lsDeleteNode(idx){ lsDeleteNode(idx); },
     lsClear(){ lsClearAll(); status('All morph points removed.'); },
