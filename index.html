@@ -652,13 +652,27 @@
           <div class="row">
             <label class="check"><input type="checkbox" x-model="exportLimitColours"> <span>At most</span></label>
             <input x-model.number="exportMaxColours" type="number" min="1" max="16" step="1" :disabled="!exportLimitColours"><span class="unit">colours — one per filament</span></div>
+          <div x-show="exportFmtNow==='3mf'">
+            <label class="check"><input type="checkbox" x-model="exportMix"> <span>Mix the colours from the loaded filaments (Snapmaker Orca)</span></label>
+            <div x-show="exportMix">
+              <div class="row"><label>Filament 1 – <span x-text="exportFilaments.length"></span></label>
+                <template x-for="(c,i) in exportFilaments" :key="i"><input type="color" x-model="exportFilaments[i]" :title="'Filament '+(i+1)+': '+exportFilaments[i]"></template></div>
+              <p class="hint">Every colour of the chain is printed with one of these filaments, or with two of them in alternating layers — the slicer's mixed filaments, numbered on from the last real one. So more colours than filaments are fine.</p>
+            </div>
+          </div>
           <p class="hint" x-show="exportPalette.length" x-text="exportColourNote"></p>
-          <div class="palette" x-show="exportPalette.length">
+          <div class="palette" x-show="exportPalette.length && !exportMixOn">
             <template x-for="(c,i) in exportPalette" :key="i">
               <span class="pal"><i :style="'background:'+c.hex"></i><b x-text="i+1"></b><span x-text="c.hex+' · '+c.share+' %'"></span></span>
             </template>
           </div>
-          <p class="hint" x-show="exportFmtNow==='3mf' && exportPalette.length">In the slicer use <b>File → Import</b> (not “Open project”) and give filament 1, 2, 3 … these colours. Filament 1 is the object's own filament; the others arrive as colour painting.</p>
+          <div class="palette mixed" x-show="exportPalette.length && exportMixOn">
+            <template x-for="(c,i) in exportPalette" :key="i">
+              <span class="pal" :title="'wanted '+c.hex+' → printed '+c.made"><i :style="'background:'+c.hex"></i><span>→</span><i :style="'background:'+c.made"></i><b x-text="c.fil"></b><span x-text="c.recipe+' · '+c.share+' %'"></span></span>
+            </template>
+          </div>
+          <p class="hint" x-show="exportFmtNow==='3mf' && exportPalette.length && !exportMixOn">In the slicer use <b>File → Import</b> (not “Open project”) and give filament 1, 2, 3 … these colours. Filament 1 is the object's own filament; the others arrive as colour painting.</p>
+          <p class="hint" x-show="exportMixOn && exportPalette.length">Left the colour of the chain, right what the mix should look like, then the filament number it is painted with. Open this file with <b>File → Open project</b>: the mixes are print settings and only come along that way. The project takes its printer, process and filament settings from <code>slicer/snapmaker_u1_project_settings.json</code> (Snapmaker U1, 0.4 nozzle) — change them in the slicer as you like.</p>
         </div>
         <div class="row">
           <label class="check"><input type="checkbox" x-model="exportReduce"> <span>Smaller file — at most</span></label>

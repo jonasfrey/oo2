@@ -30,6 +30,13 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
    **At most N colours** (on, 4) merges similar colours until N are left — one per filament; the page lists them, numbered.
    a part without colours of its own still gets them in the file once "Colour along the chain" returns a colour for a link
    (Two colours, Gradient, Rainbow …): one colour per link.
+   **Mix the colours from the loaded filaments** (3MF, Snapmaker Orca): the colours are not filaments of their own but made
+   from the ones in the printer (default cyan, magenta, yellow, black): each colour is printed with one filament, or with two
+   in alternating layers — the slicer's mixed filaments ("filament 5, 6 …"). the page shows, per colour, the mix and what it
+   should look like (same colour model as the slicer). this writes a slicer *project*: open it with File → Open project.
+   its printer / process / filament settings come from `slicer/snapmaker_u1_project_settings.json` (the project settings of a
+   project saved by Snapmaker Orca 2.4.1 — replace the file with the `Metadata/project_settings.config` of another project to
+   change them). see `slicer/OrcaProject.js` for the file format.
 
 projects (open / save / delete, project file .json) are behind the **Projects** / **Save** buttons in the header.
 

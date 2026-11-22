@@ -22,6 +22,7 @@ import { ViewCube }               from './ViewCube.js';
 import { importDecoration, simplifyColored, weldWithColors } from './deco/DecoImport.js';
 import { fuseGeometries, solidWithColor } from './deco/Fuse.js';
 import { TransformGizmo }         from './deco/TransformGizmo.js';
+import { planMixes, snapmakerProject } from './slicer/OrcaProject.js';
 
 // three-mesh-bvh wiring (BVH-accelerated raycast + bounds tree on BufferGeometry)
 THREE.BufferGeometry.prototype.computeBoundsTree   = computeBoundsTree;
@@ -1774,11 +1775,11 @@ function writeOBJ(geo){
   else    for(let i=0;i<n;i+=3)         out.push('f '+v(i)+' '+v(i+1)+' '+v(i+2));
   return out.join('\n')+'\n';
 }
-async function encodeChain(mesh, geo, fmt, ranges, pal){
+async function encodeChain(mesh, geo, fmt, ranges, pal, mix){
   const title=(UI.projectTitle||S.meshName||'').trim().replace(/[^\w.-]+/g,'_');
   const base=(title && title!=='part' ? title : 'articulated')+'-chain';
   if(fmt==='3mf'){
-    return {blob:new Blob([await write3MF(geo, ranges, pal, base)],{type:'model/3mf'}), name:base+'.3mf'};
+    return {blob:new Blob([await write3MF(geo, ranges, pal, base, mix)],{type:'model/3mf'}), name:base+'.3mf'};
   }
   if(fmt==='stl'){
     const dv=new STLExporter().parse(mesh,{binary:true});
@@ -1803,6 +1804,12 @@ async function exportChain(){
   const keepColor = fmt!=='stl' && chainHasColours();      // STL has no color; every other format keeps it
   const cap=exportVertCap(), lite=new Map();               // "Smaller file": source geometry → its lighter copy (made once, used for every link)
   const pal = keepColor ? chainPalette(exportColourCap(fmt)) : null;   // the colours of the file (null: a plain part)
+  let mix = null;                                          // "Mix the colours": a slicer project with mixed filaments
+  if(pal && exportMixing(fmt)){
+    mix=mixPlan(pal);
+    try{ const r=await fetch(MIX_TEMPLATE); if(!r.ok) throw new Error(r.status); mix.settings=await r.json(); }
+    catch(e){ status('The slicer settings for the project ('+MIX_TEMPLATE+') could not be loaded: '+e.message,'err'); return; }
+  }
   if(cap){ status('Reducing the links for the file…'); await new Promise(r=>setTimeout(r,10)); }   // let the status line repaint
   const geos=[], ranges=[], rgb=[0,0,0];
   for(let i=0;i<S.poses.length;i++){
@@ -1833,10 +1840,11 @@ async function exportChain(){
   geos.forEach(g=>g.dispose()); lite.forEach(g=>g.dispose());
   const mesh=new THREE.Mesh(merged, keepColor?partMaterial(merged):undefined);
   const tris=merged.index?merged.index.count/3:merged.attributes.position.count/3;
-  const {blob,name}=await encodeChain(mesh, merged, fmt, ranges, pal);
+  const {blob,name}=await encodeChain(mesh, merged, fmt, ranges, pal, mix);
   merged.dispose();
   download(blob,name);
-  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles${pal?` · ${pal.colours.length} colour${pal.colours.length>1?'s':''}`:''} · ${fmtBytes(blob.size)}${lite.size?' (reduced)':''}.`;
+  const cols = !pal ? '' : mix ? ` · ${new Set(mix.filamentOf).size} colours from ${mix.filaments.length} filaments (${mix.mixes.length} mixed)` : ` · ${pal.colours.length} colour${pal.colours.length>1?'s':''}`;
+  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles${cols} · ${fmtBytes(blob.size)}${lite.size?' (reduced)':''}.`;
   status(name.toUpperCase().split('.').pop()+' downloaded: '+name,'ok');
 }
 
@@ -1846,8 +1854,9 @@ async function exportChain(){
    N are left ("At most N colours" on the Export page; 3MF always has a limit, it stores filament numbers). */
 const MAX_FILAMENTS=16;
 function exportColourCap(fmt){     // 0 = every colour as it is
-  const n=Math.min(MAX_FILAMENTS, Math.max(1, Math.round(+UI.exportMaxColours)||4));
-  return UI.exportLimitColours ? n : fmt==='3mf' ? MAX_FILAMENTS : 0;
+  const most = exportMixing(fmt) ? MAX_FILAMENTS-UI.exportFilaments.length : MAX_FILAMENTS;   // mixed filaments are numbered on from the real ones
+  const n=Math.min(most, Math.max(1, Math.round(+UI.exportMaxColours)||4));
+  return UI.exportLimitColours ? n : fmt==='3mf' ? most : 0;
 }
 /* Does the chain carry colours? A coloured part always does. A plain part does once "Colour along the chain" gives
    some link a colour of its own — the alternating look of the default code only tells the links apart in the view. */
@@ -1949,30 +1958,42 @@ function mergeColours(cols, k){
    OrcaSlicer family (Snapmaker Orca among them) keep that as colour painting: paint_color on a triangle, "4" = filament 1,
    "8" = 2, "0C" = 3, "1C" = 4 … The most used colour is filament 1 and stays unpainted: it is the object's own filament.
    The colours also go in as a standard 3MF colour group, for programs that read those. */
-const paintCode=f=> f===1 ? '4' : f===2 ? '8' : (f-3).toString(16).toUpperCase()+'C';
-async function write3MF(geo, ranges, pal, title){
-  const {zipSync, strToU8}=await import('three/addons/libs/fflate.module.js');
+function paintCode(f){                       // the slicer's own notation of "this whole triangle: filament f"
+  if(f<3) return f===1 ? '4' : '8';
+  let n=f-3, s='C';
+  while(n>=15){ s='F'+s; n-=15; }
+  return n.toString(16).toUpperCase()+s;
+}
+/* "Mix the colours" (3MF only): the colours are not filaments of their own but made from the loaded ones — each
+   colour is printed with one of them, or with two in alternating layers (Snapmaker Orca's mixed filaments, numbered
+   on from the last real one). That needs the slicer's project format: see slicer/OrcaProject.js. */
+const MIX_TEMPLATE='slicer/snapmaker_u1_project_settings.json';   // print settings the project is given: from a project saved by the slicer
+const exportMixing=fmt=>fmt==='3mf' && !!UI.exportMix;
+function mixPlan(pal){
+  const filaments=UI.exportFilaments.map(c=>String(c).toUpperCase());
+  const plan=planMixes(pal.colours.map(c=>c.hex), filaments);
+  const share=filaments.map(()=>0);                                  // how much of the chain each real filament prints on its own
+  plan.colours.forEach((c,i)=>{ if(c.filament<=filaments.length) share[c.filament-1]+=pal.colours[i].share; });
+  const base=share.indexOf(Math.max(...share))+1;                     // … the busiest one is the object's own filament
+  return {filaments, base, filamentOf:plan.colours.map(c=>c.filament), colours:plan.colours, mixes:plan.mixes};
+}
+/* the chain as the <mesh> of a 3MF. filamentOf: which filament each colour of pal is painted with (base: left unpainted);
+   group: also refer to the standard colour group; centre: write the coordinates relative to the middle of the chain */
+function meshXml(geo, ranges, pal, {filamentOf=null, base=1, group=false, centre=false}={}){
   const pos=geo.getAttribute('position'), col=pal&&geo.getAttribute('color'), idx=geo.index;
+  geo.computeBoundingBox();
+  const bb=geo.boundingBox, mid=centre ? bb.getCenter(new THREE.Vector3()) : new THREE.Vector3();
   const enc=new TextEncoder(), parts=[]; let lines=[], bytes=0;
   const flush=()=>{ if(lines.length){ const u=enc.encode(lines.join('\n')+'\n'); parts.push(u); bytes+=u.length; lines=[]; } };
   const put=l=>{ lines.push(l); if(lines.length>=20000) flush(); };
-  const num=v=>String(+v.toFixed(4)), esc=t=>String(t).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]);
-  put('<?xml version="1.0" encoding="UTF-8"?>');
-  put('<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
-    +(col?' xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"':'')+'>');
-  put(`<metadata name="Title">${esc(title)}</metadata>`);
-  put('<metadata name="Application">Articulated Spiral Builder</metadata>');
-  if(col) put(`<metadata name="Description">${esc(pal.colours.map((c,i)=>`filament ${i+1}: ${c.hex}`).join(', '))}</metadata>`);
-  put('<resources>');
-  if(col) put('<m:colorgroup id="2">'+pal.colours.map(c=>`<m:color color="${c.hex}"/>`).join('')+'</m:colorgroup>');
-  put(`<object id="1" type="model" name="${esc(title)}"${col?' pid="2" pindex="0"':''}>`);
+  const num=v=>String(+v.toFixed(4));
   put('<mesh>'); put('<vertices>');
   /* vertices: one per position within a link (a colour seam has two on the same spot — the slicer wants a closed surface) */
   const remap=new Uint32Array(pos.count); let nv=0, v=0;
   for(const count of ranges){
     const seen=new Map();
     for(const end=v+count; v<end; v++){
-      const x=num(pos.getX(v)), y=num(pos.getY(v)), z=num(pos.getZ(v)), k=x+' '+y+' '+z;
+      const x=num(pos.getX(v)-mid.x), y=num(pos.getY(v)-mid.y), z=num(pos.getZ(v)-mid.z), k=x+' '+y+' '+z;
       let i=seen.get(k);
       if(i===undefined){ i=nv++; seen.set(k,i); put(`<vertex x="${x}" y="${y}" z="${z}"/>`); }
       remap[v]=i;
@@ -1986,21 +2007,46 @@ async function write3MF(geo, ranges, pal, title){
     if(ra===rb||rb===rc||ra===rc) continue;                     // collapsed by the weld
     let l=`<triangle v1="${ra}" v2="${rb}" v3="${rc}"`;
     if(col){
-      const pa=ci(a), pb=ci(b), pc=ci(c), f = pb===pc ? pb : pa;          // the colour two of its corners agree on
-      if(f>0) l+=` pid="2" p1="${f}" paint_color="${paintCode(f+1)}"`;
+      const pa=ci(a), pb=ci(b), pc=ci(c), k = pb===pc ? pb : pa, f=filamentOf[k];   // the colour two of its corners agree on
+      if(group && k>0) l+=` pid="2" p1="${k}"`;
+      if(f!==base) l+=` paint_color="${paintCode(f)}"`;
     }
     put(l+'/>');
   }
-  put('</triangles>'); put('</mesh>'); put('</object>'); put('</resources>');
-  put('<build><item objectid="1"/></build>'); put('</model>');
+  put('</triangles>'); put('</mesh>');
   flush();
-  const model=new Uint8Array(bytes); let o=0; for(const u of parts){ model.set(u,o); o+=u.length; }
+  const out=new Uint8Array(bytes); let o=0; for(const u of parts){ out.set(u,o); o+=u.length; }
+  return {bytes:out, halfHeight:(bb.max.z-bb.min.z)/2};
+}
+async function write3MF(geo, ranges, pal, title, mix){
+  const {zipSync, strToU8}=await import('three/addons/libs/fflate.module.js');
+  const u8=o=>Object.fromEntries(Object.entries(o).map(([k,v])=>[k, typeof v==='string' ? strToU8(v) : v]));
+  if(mix){                                             // a Snapmaker Orca project: settings, filament colours, mixes
+    const {bytes,halfHeight}=meshXml(geo, ranges, pal, {filamentOf:mix.filamentOf, base:mix.base, centre:true});
+    return zipSync(u8(snapmakerProject({mesh:bytes, halfHeight, title, settings:mix.settings, filaments:mix.filaments, mixes:mix.mixes, base:mix.base})), {level:6});
+  }
+  const col=!!pal;
+  const {bytes}=meshXml(geo, ranges, pal, {filamentOf:col?pal.colours.map((c,i)=>i+1):null, group:col});
+  const esc=t=>String(t).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]);
+  const head=strToU8('<?xml version="1.0" encoding="UTF-8"?>\n'
+    +'<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
+    +(col?' xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"':'')+'>\n'
+    +`<metadata name="Title">${esc(title)}</metadata>\n`
+    +'<metadata name="Application">Articulated Spiral Builder</metadata>\n'
+    +(col?`<metadata name="Description">${esc(pal.colours.map((c,i)=>`filament ${i+1}: ${c.hex}`).join(', '))}</metadata>\n`:'')
+    +'<resources>\n'
+    +(col?'<m:colorgroup id="2">'+pal.colours.map(c=>`<m:color color="${c.hex}"/>`).join('')+'</m:colorgroup>\n':'')
+    +`<object id="1" type="model" name="${esc(title)}"${col?' pid="2" pindex="0"':''}>\n`);
+  const tail=strToU8('</object>\n</resources>\n<build><item objectid="1"/></build>\n</model>\n');
+  const model=new Uint8Array(head.length+bytes.length+tail.length);
+  model.set(head,0); model.set(bytes,head.length); model.set(tail,head.length+bytes.length);
   return zipSync({
     '[Content_Types].xml': strToU8('<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>'),
     '_rels/.rels': strToU8('<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>'),
     '3D/3dmodel.model': model,
   }, {level:6});
 }
+
 function download(blob,name){
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
   a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
@@ -2514,8 +2560,9 @@ function updateExportPalette(){
   const fmt=exportFormat();
   UI.chainColoured=chainHasColours();
   if(S.uiStep!=='s4' || !S.poses.length || fmt==='stl' || !UI.chainColoured){ UI.exportPalette=[]; return; }
-  const pal=chainPalette(exportColourCap(fmt));
-  UI.exportPalette=pal.colours.map(c=>({hex:c.hex, share:Math.max(1,Math.round(c.share*100))}));
+  const pal=chainPalette(exportColourCap(fmt)), mix=exportMixing(fmt) ? mixPlan(pal) : null;
+  UI.exportPalette=pal.colours.map((c,i)=>({hex:c.hex, share:Math.max(1,Math.round(c.share*100)),
+    ...(mix ? {fil:mix.filamentOf[i], made:mix.colours[i].hex, recipe:mix.colours[i].recipe} : {fil:i+1})}));
   UI.exportFound=pal.found;
 }
 function updateExportEstimate(){
@@ -3784,7 +3831,8 @@ function chainApp(){
     swapFileBtnDisabled:true, swapClearDisabled:true, swapClearAllDisabled:true,
     gizmoActive:false, gizmoMode:'translate',
     exportOut:'', exportLabel:'⬇ Download STL', exportFmt:'auto', exportFmtNow:'stl',   // exportFmtNow: what 'auto' comes to
-    exportLimitColours:true, exportMaxColours:4, exportPalette:[], exportFound:0, chainColoured:false,     // at most N colours in the file — one per filament
+    exportLimitColours:true, exportMaxColours:4, exportPalette:[], exportFound:0, chainColoured:false,
+    exportMix:false, exportFilaments:['#00C3FF','#F54399','#FAE727','#000000'],       // 3MF: make the colours from these loaded filaments (cyan, magenta, yellow, black) and mixes of two     // at most N colours in the file — one per filament
     exportReduce:false, exportMaxVerts:CONST.MAX_VERTS_PER_LINK, exportEst:'',   // optional: fewer vertices per link, in the file only
     /* ----- decorate (optional step) ----- */
     decoLoaded:false, decoFused:false, decoCanEdit:false, decoBusy:false,
@@ -3882,6 +3930,11 @@ function chainApp(){
       this.$watch('decoMateOn',()=>decoChanged(true));
       { const f=localStorage.getItem('exportFmt'); if(f==='auto' || EXPORT_FORMATS.includes(f)) this.exportFmt=f; }   // the slicer decides the format — remember it
       this.$watch('exportFmt', v=>{ localStorage.setItem('exportFmt',v); updateExportLabel(); updateExportEstimate(); });
+      try{ const m=JSON.parse(localStorage.getItem('exportMix')||'null');      // the printer's filaments stay the same from project to project
+           if(m && Array.isArray(m.filaments) && m.filaments.length===this.exportFilaments.length && m.filaments.every(c=>/^#[0-9a-f]{6}$/i.test(c))){ this.exportMix=!!m.on; this.exportFilaments=m.filaments; } }catch(e){}
+      const mixChanged=()=>{ localStorage.setItem('exportMix', JSON.stringify({on:this.exportMix, filaments:this.exportFilaments})); updateExportEstimate(); };
+      this.$watch('exportMix', mixChanged);
+      this.$watch('exportFilaments', mixChanged);
       this.$watch('exportLimitColours', ()=>updateExportEstimate());
       this.$watch('exportMaxColours', ()=>updateExportEstimate());
 
@@ -3982,6 +4035,7 @@ function chainApp(){
       const n=this.exportPalette.length, all=this.exportFound;
       return all>n ? `The chain has ${all} colours — similar ones are merged into these ${n}:` : `The chain has ${n} colour${n>1?'s':''}:`;
     },
+    get exportMixOn(){ return this.exportMix && this.exportFmtNow==='3mf' && this.chainColoured; },
     onCutFold(open){ this.cutFold=open; if(open) startCutPreview(true); else clearCutPreview(); },
     get cutInfo(){ const off=this.cutHeight-this.cutMin, all=this.cutMax-this.cutMin; return `Cuts off the lowest ${off.toFixed(1)} mm of ${all.toFixed(1)} mm — ${Math.round(100*off/all)} % of the height.`; },
     get cutSummary(){ return this.cutOn ? `links cut ${(this.cutAt-this.cutMin).toFixed(1)} mm up` : ''; },
