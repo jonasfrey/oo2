@@ -36,7 +36,7 @@ document.addEventListener('alpine:init', ()=>{ window.Alpine.data('chainApp', ch
    Everything a maker is likely to tweak lives here.                          */
 const CONST = {
   DEFAULT_GAP_MM      : 0.4,    // print clearance along the mating direction
-  DEFAULT_PLATE_MM    : 220,    // square build plate edge
+  DEFAULT_PLATE_MM    : 256,    // square print bed edge
   PART_COLOR          : 0x9aa7b4,
   PIN_COLOR           : 0xff5d5d,
   LINK_OK_COLOR       : new THREE.Color(0x6fcf97),
@@ -153,20 +153,33 @@ const decoGizmo = new TransformGizmo({ scene, camera, renderer, controls });
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202830, 1.1));
 const dir = new THREE.DirectionalLight(0xffffff, 1.4); dir.position.set(80,-120,200); scene.add(dir);
 
-// Build-plate grid + axes (XY plane, Z up)
-let grid = new THREE.GridHelper(CONST.DEFAULT_PLATE_MM, 22, 0x33424f, 0x222b33);
-grid.rotation.x = Math.PI/2;               // lay grid flat on XY
-scene.add(grid);
-const axes = new THREE.AxesHelper(40); scene.add(axes);
-let plateOutline = makePlateOutline(CONST.DEFAULT_PLATE_MM); scene.add(plateOutline);
-
-function makePlateOutline(size){
-  const h=size/2;
-  const g=new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(-h,-h,0),new THREE.Vector3(h,-h,0),
-    new THREE.Vector3(h,h,0),new THREE.Vector3(-h,h,0),new THREE.Vector3(-h,-h,0)]);
-  return new THREE.Line(g,new THREE.LineBasicMaterial({color:0x3a4a58}));
+/* ---- print bed (XY plane, Z up): the plate itself, a line every 10 mm, its edge — and the world axes ----
+   It is drawn centred under what the page shows (syncBed), so whatever sticks out over the edge does not fit. */
+const BED = { fill:0x1d2936, line:0x2b3846, major:0x3d5064, edge:0x7088a0, edgeOver:0xffcc66 };
+function makeBed(size){
+  const h=size/2, bed=new THREE.Group();
+  const plate=new THREE.Mesh(new THREE.PlaneGeometry(size,size),      // seen from above only: from below the underside of a part stays in clear view
+    new THREE.MeshBasicMaterial({color:BED.fill, transparent:true, opacity:.72, depthWrite:false}));
+  plate.position.z=-0.05; plate.renderOrder=-1;                       // a hair under the lines and under whatever lies on the plate
+  const pts=[], cols=[], c=new THREE.Color();
+  for(let k=1; k*10<size-1e-6; k++){                                  // counted from the front left corner; every 50 mm a stronger line
+    const v=-h+k*10; c.set(k%5 ? BED.line : BED.major);
+    pts.push(v,-h,0, v,h,0, -h,v,0, h,v,0);
+    for(let i=0;i<4;i++) cols.push(c.r,c.g,c.b);
+  }
+  const lg=new THREE.BufferGeometry();
+  lg.setAttribute('position', new THREE.Float32BufferAttribute(pts,3));
+  lg.setAttribute('color', new THREE.Float32BufferAttribute(cols,3));
+  const lines=new THREE.LineSegments(lg, new THREE.LineBasicMaterial({vertexColors:true}));
+  const edge=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-h,-h,0),new THREE.Vector3(h,-h,0),new THREE.Vector3(h,h,0),new THREE.Vector3(-h,h,0)]),
+    new THREE.LineBasicMaterial({color:BED.edge}));
+  bed.add(plate, lines, edge);
+  bed.userData={size, edge};
+  return bed;
 }
+let bed = makeBed(CONST.DEFAULT_PLATE_MM); scene.add(bed);
+const axes = new THREE.AxesHelper(40); scene.add(axes);
 
 function resize(){
   const r=wrap.getBoundingClientRect();
@@ -242,6 +255,7 @@ const S = {
   lsActiveNodeIdx:-1,   // which node is selected for editing
   lsChainGroup:null,    // THREE.Group with one deformed Mesh per link (replaces S.chain visually)
   mirroredBaseGeo:null, // cached full-part geometry built from the half-part when mirror is enabled
+  footCenter:null,       // middle of the chain's footprint (set by regen) — the print bed is drawn centred under it
   deco:null,            // object fused onto the link: {name,colorSource,missing,work,geo,mesh,fused,linkPreFuse,preFuseColor,meshId,linkMeshId}
   decoGhost:null,       // translucent neighbouring link (+ its object) shown while placing the object
 };
@@ -443,6 +457,7 @@ let viewFit=null;                          // middle + radius of what the view w
 /* Look at the middle of the content from a named direction, far enough away that all of it is in view.
    pad > 1 leaves air around it. */
 function frameContent(dirName='iso', pad=1.15){
+  syncBed();
   const {center,radius}=contentBounds();
   const half=THREE.MathUtils.degToRad(camera.fov)/2;                       // the narrower side of the view decides the distance
   const fit=radius/Math.sin(Math.min(half, Math.atan(Math.tan(half)*camera.aspect)));
@@ -464,7 +479,9 @@ function setView(name){ frameContent(name); }
      because the user is dragging it, and a camera that moves along would fight the drag;
    · once the user has moved the view sideways (right-drag): their framing stands until the next preset. */
 function followContent(){
-  if(!viewFit || viewPointerDown) return;
+  if(viewPointerDown) return;
+  syncBed();                                  // the bed goes along in any case, also where the view itself is left alone
+  if(!viewFit) return;
   const kind=viewKind(S.uiStep);
   if(kind!=='part' && kind!=='chain') return;
   if(controls.target.distanceTo(viewFit.center) > viewFit.radius*0.02) return;
@@ -1566,9 +1583,10 @@ function regen(force){
   recolorOverrides(bad); showSelection();
   const fp=new THREE.Box3(); poses.forEach((p,i)=>fp.union(worldAABB(linkWorldMatrix(i),linkGeom(i))));
   const fs=fp.getSize(new THREE.Vector3());
+  S.footCenter=fp.getCenter(new THREE.Vector3());
   const plate=P().plate;
   const off = fs.x>plate||fs.y>plate;
-  updatePlate(plate);
+  updatePlate(plate, off);
   if(!doCheck){UI.chipCollide=`<span class="warn">${poses.length} links — press “Re-check”</span>`;}
   else if(bad.size===0){UI.chipCollide=`<span class="ok">✓ no overlaps</span> · ${pairs} pairs tested`;}
   else{UI.chipCollide=`<span class="err">✗ ${bad.size} links overlap</span>`;}
@@ -1581,22 +1599,29 @@ function regen(force){
   if(!doCheck){ msg+=' Collision check skipped (large count) — press “Re-check”.'; kind=''; }
   else if(bad.size) msg+=` ${bad.size} links collide (red).`;
   else msg+=' No mesh overlaps.';
-  if(off){msg+=` ⚠ Exceeds ${plate} mm plate.`; if(!bad.size)kind='';}
+  if(off){msg+=` ⚠ Larger than the ${plate} mm print bed.`; if(!bad.size)kind='';}
   status(msg,kind);
   UI.s3nextDisabled=false;
   followContent();                          // more links / another shape → the view stays on the middle of the chain
   updateExportEstimate();                   // file size follows the link count
   return {bad,off};
 }
-let lastPlate=CONST.DEFAULT_PLATE_MM;
-function updatePlate(size){
-  if(size===lastPlate) return;             // only rebuild when it actually changes
-  lastPlate=size;
-  scene.remove(grid); grid.geometry.dispose();
-  grid=new THREE.GridHelper(size,Math.max(10,Math.round(size/10)),0x33424f,0x222b33);
-  grid.rotation.x=Math.PI/2; scene.add(grid);
-  scene.remove(plateOutline); plateOutline.geometry.dispose();
-  plateOutline=makePlateOutline(size); scene.add(plateOutline);
+function updatePlate(size, over=false){
+  size=Math.max(10, +size||CONST.DEFAULT_PLATE_MM);
+  if(size!==bed.userData.size){            // only rebuild when it actually changes
+    const old=bed;
+    bed=makeBed(size); bed.position.copy(old.position); scene.add(bed);
+    scene.remove(old); old.traverse(o=>{ o.geometry?.dispose(); o.material?.dispose(); });
+  }
+  bed.userData.edge.material.color.set(over ? BED.edgeOver : BED.edge);   // the chain is larger than the bed → its edge lights up
+}
+/* The bed is drawn centred under the chain (Chain / Export pages) or under the part (everywhere else), the way a
+   slicer centres a model on the plate. */
+function syncBed(){
+  let c=null;
+  if(viewKind(S.uiStep)==='chain' && S.poses.length) c=S.footCenter;
+  else if(S.baseGeo){ S.baseGeo.computeBoundingBox(); c=S.baseGeo.boundingBox.getCenter(new THREE.Vector3()); }
+  bed.position.set(c?c.x:0, c?c.y:0, 0);
 }
 
 /* ======================================================================== *
@@ -3391,7 +3416,7 @@ function chainApp(){
     /* ----- step 3 ----- */
     chainLenVal:'—', chainLenSub:'',
     chainState:'', chainBad:0, chainFoot:'', chainOff:false,   // filled by regen(): '' | 'ok' | 'bad' | 'unchecked'
-    shape:'straight', count:14, startR:25, spacing:16, plate:220,
+    shape:'straight', count:14, startR:25, spacing:16, plate:CONST.DEFAULT_PLATE_MM,
     scaleErr:'', scaleErrColor:'', colorErr:'', colorErrColor:'', pathErr:'', pathErrColor:'', solveOut:'',
     s3nextDisabled:true,
     /* ----- step 4 ----- */

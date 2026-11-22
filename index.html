@@ -503,8 +503,8 @@
           </div>
           <p class="verdict warn" x-show="chainState==='unchecked'">Overlaps not checked yet — that takes a moment with this many links.
             <button class="ghost sm" @click="recheck()">Check now</button></p>
-          <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm plate.</p>
-          <p class="hint" x-show="!chainOff && chainFoot">Footprint <span x-text="chainFoot"></span> — fits the <span x-text="plate"></span> mm plate.</p>
+          <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm print bed.</p>
+          <p class="hint" x-show="!chainOff && chainFoot">Footprint <span x-text="chainFoot"></span> — fits the <span x-text="plate"></span> mm print bed.</p>
         </div>
 
         <div class="row"><label>Shape</label>
@@ -586,9 +586,10 @@
         </details>
 
         <details class="fold">
-          <summary>Build plate <span class="sum" x-text="plate+' mm'"></span></summary>
+          <summary>Print bed <span class="sum" x-text="plate+' × '+plate+' mm'"></span></summary>
           <div class="foldbody">
-            <div class="row"><label>Plate size (mm, square)</label><input x-model.number="plate" type="number" step="10"></div>
+            <p class="hint">The plate in the view. It is shown centred under the chain: whatever sticks out over its edge doesn't fit.</p>
+            <div class="row"><label>Bed size (mm, square)</label><input x-model.number="plate" type="number" min="10" step="1"></div>
             <div class="btnrow"><button class="ghost sm" @click="recheck()">Re-check collisions</button></div>
             <p class="hint" id="solveOut" x-html="solveOut"></p>
           </div>
@@ -606,7 +607,7 @@
           <p class="verdict bad" x-show="chainState==='bad'">✗ <span x-text="chainBad"></span> links overlap — they would fuse when printed.
             <button class="ghost sm" @click="goStep('s3')">Fix on the Chain page</button></p>
           <p class="verdict warn" x-show="chainState==='unchecked'">Overlaps not checked yet. <button class="ghost sm" @click="recheck()">Check now</button></p>
-          <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm plate.</p>
+          <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm print bed.</p>
         </div>
 
         <div class="row"><label>Chain direction</label>

@@ -22,6 +22,11 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
 
 projects (open / save / delete, project file .json) are behind the **Projects** / **Save** buttons in the header.
 
+the view shows the **print bed**: the plate (256 × 256 mm by default; Chain → Print bed), a line every 10 mm, stronger every 50 mm.
+it is drawn centred under the chain (under the part on the other pages), so whatever sticks out over its edge doesn't fit —
+the edge turns yellow then. seen from below the plate is hidden, so the underside of a part stays visible.
+projects saved earlier keep the bed size they were saved with (220).
+
 the 3d view always looks at — and orbits around — the middle of what the page shows (part, part + next link, chain),
 and keeps doing so while that changes (more links, other shape, turned part). right-drag moves the view away on purpose;
 Iso / Top / Front / Side or the cube bring it back.
