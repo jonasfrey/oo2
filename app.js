@@ -51,7 +51,8 @@ const CONST = {
   OVERRIDE_COLOR      : new THREE.Color(0xc792ea),// links swapped for a custom model
   SELECT_COLOR        : 0xffffff,// selection box around the picked link
   STL_BYTES_PER_TRI   : 50,     // binary STL: 50 bytes/triangle + 84-byte header
-  MAX_VERTS_PER_LINK  : 2000,   // default per-link vertex cap — auto-simplify targets this
+  MAX_VERTS_PER_LINK  : 2000,   // default vertex cap per link for the optional "smaller file" reduction at export
+  BIG_FILE_MB         : 100,    // a full-detail file estimated above this → the Export page points at "Smaller file"
                                 // (≈4k tris/link → 400 links ≈ 1.6M tris ≈ 76 MB STL)
 };
 
@@ -227,8 +228,6 @@ const S = {
   scales:[],             // per-link scale actually used (for status/debug)
   partEdges:null,        // LineSegments outline of the single part (x-ray)
   matePreview:null,      // ghost of the neighbouring link shown in step 2
-  geoPristine:null,      // pre-simplify copy of baseGeo, for "restore full detail"
-  appliedPct:0,          // reduction % currently baked into baseGeo (0 = full detail)
   geoPreCut:null,        // pre-flatten copy of baseGeo, for "undo cut"
   cutPlaneViz:null,      // translucent plane previewing the flatten-bottom cut height
   overrides:new Map(),   // link index → {geo,name}: that slot uses a custom model
@@ -343,7 +342,6 @@ function setBaseGeometry(geo, opts={}){
 
   if (S.partMesh){ scene.remove(S.partMesh); S.partMesh.geometry.dispose(); }
   if (S.matePreview){ scene.remove(S.matePreview); S.matePreview.material.dispose(); S.matePreview=null; }
-  if (S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }   // new part → drop the old detail master
   if (S.geoPreCut){ S.geoPreCut.dispose(); S.geoPreCut=null; }         // and any pending "undo cut" for the old part
   clearCutPreview();
   if (UI){ UI.hasCutUndo=false; UI.cutHeight=0; }
@@ -351,8 +349,6 @@ function setBaseGeometry(geo, opts={}){
   if (S.overrideGroup){ scene.remove(S.overrideGroup); S.overrideGroup.traverse(o=>o.material&&o.material.dispose()); S.overrideGroup=null; }
   S.alignMatrix.identity();                         // fresh part → its own alignment starts from scratch
   S.selectedLink=null; if(S.selBox){ scene.remove(S.selBox); S.selBox=null; }
-  S.appliedPct=0;
-  UI.simResetDisabled=true; UI.simPct=0;
   if (S.baseGeo){ S.baseGeo.disposeBoundsTree?.(); S.baseGeo.dispose(); }
   if (S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
 
@@ -371,7 +367,7 @@ function setBaseGeometry(geo, opts={}){
   updateDebugViz();
   updateMeshChips();
   updateExportLabel();                      // reflect the loaded file's format on the download button
-  if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();   // show the recommended reduction
+  updateExportEstimate();
   UI.s1nextDisabled=false;
   UI.hasPart=true; UI.partName=S.meshName; UI.partHasColor=hasVColor(geo);
   fitToolSizes();
@@ -624,8 +620,6 @@ function exitSculpt(){
   sculpt.disable(); status('');
   // refresh everything downstream that reads S.baseGeo
   S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;   // chain build rebuilds via ensureBVH()
-  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; } // pre-simplify master no longer valid
-  S.appliedPct=0; if(UI){ UI.simResetDisabled=true; UI.simPct=0; }
   S.meshDirty=true;
   updatePartEdges(); updateDebugViz(); updateMeshChips(); setAnchorRanges();
 }
@@ -720,8 +714,6 @@ function exitHeight(){
   disp.disable(); status('');
   // same downstream invalidation as exitSculpt — geometry changed in place
   S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;
-  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }
-  S.appliedPct=0; if(UI){ UI.simResetDisabled=true; UI.simPct=0; }
   S.meshDirty=true;
   updatePartEdges(); updateDebugViz(); updateMeshChips(); setAnchorRanges();
 }
@@ -1593,7 +1585,7 @@ function regen(force){
   status(msg,kind);
   UI.s3nextDisabled=false;
   followContent();                          // more links / another shape → the view stays on the middle of the chain
-  if(UI.simAuto) autoFitReduction(false);   // keep the auto reduction target current with link count
+  updateExportEstimate();                   // file size follows the link count
   return {bad,off};
 }
 let lastPlate=CONST.DEFAULT_PLATE_MM;
@@ -1657,14 +1649,18 @@ async function encodeChain(mesh, geo, fmt){
 }
 async function exportChain(){
   if(!S.poses.length){status('Build the chain first.','err');return;}
-  if(UI.simAuto) await autoFitReduction(true);   // make sure the file meets the size cap
   const fmt=exportFormat();
   const keepColor = fmt!=='stl' && hasVColor(S.baseGeo);   // STL has no color; every other format keeps it
+  const cap=exportVertCap(), lite=new Map();               // "Smaller file": source geometry → its lighter copy (made once, used for every link)
+  if(cap){ status('Reducing the links for the file…'); await new Promise(r=>setTimeout(r,10)); }   // let the status line repaint
   const geos=[];
   for(let i=0;i<S.poses.length;i++){
-    let g=(UI.mirrorEnabled&&!S.overrides.has(i)&&S.mirroredBaseGeo)
-      ? S.mirroredBaseGeo.clone()    // full symmetric part for non-overridden slots
-      : linkGeom(i).clone();         // base or custom model as usual
+    let src=exportSource(i);                 // the part (mirrored to the full link for a half part), or a swapped-in model
+    if(cap && src.attributes.position.count>cap){
+      if(!lite.has(src)) lite.set(src, await reducedCopy(src,cap));
+      src=lite.get(src);
+    }
+    let g=src.clone();
     if(S.lsNodes.length){ const nor=S.poses.length>1?i/(S.poses.length-1):0; applyLSDeform(g,i,nor); }
     g.applyMatrix4(linkWorldMatrix(i));      // bake world matrix (incl. any gizmo nudge) → separate solid
     for(const a of Object.keys(g.attributes)) if(a!=='position'&&a!=='normal'&&!(keepColor&&a==='color')) g.deleteAttribute(a);
@@ -1684,13 +1680,13 @@ async function exportChain(){
     geos.push(g);
   }
   const merged=BufferGeometryUtils.mergeGeometries(geos,false);
-  geos.forEach(g=>g.dispose());
+  geos.forEach(g=>g.dispose()); lite.forEach(g=>g.dispose());
   const mesh=new THREE.Mesh(merged, keepColor?partMaterial(merged):undefined);
   const tris=merged.index?merged.index.count/3:merged.attributes.position.count/3;
   const {blob,name}=await encodeChain(mesh, merged, fmt);
   merged.dispose();
   download(blob,name);
-  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles · ${fmtBytes(blob.size)}.`;
+  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles · ${fmtBytes(blob.size)}${lite.size?' (reduced)':''}.`;
   status(name.toUpperCase().split('.').pop()+' downloaded: '+name,'ok');
 }
 function download(blob,name){
@@ -2109,10 +2105,7 @@ function updateDebugViz(){
 function updateDbgOut(){
   if(!S.baseGeo){ UI.dbgOut='Load a part to see its vertex / triangle count.'; return; }
   const v=S.baseGeo.attributes.position.count, t=Math.round(triCount(S.baseGeo));
-  const full=S.geoPristine?S.geoPristine.attributes.position.count:null;
-  UI.dbgOut = full!=null && full!==v
-    ? `now <b>${v.toLocaleString()}</b> verts · ${t.toLocaleString()} tris  (was ${full.toLocaleString()} verts — ${(100*(1-v/full)).toFixed(0)}% off)`
-    : `<b>${v.toLocaleString()}</b> verts · ${t.toLocaleString()} tris`;
+  UI.dbgOut = `<b>${v.toLocaleString()}</b> verts · ${t.toLocaleString()} tris`;
 }
 function applyXray(){
   const on=UI.xray;
@@ -2184,32 +2177,42 @@ function mateGizmoMoved(){
   if(ax.includes('Y')) setLinkOffset('y', mm(mateHandle.position.y-c.y));
 }
 
-/* ---- SIMPLIFY ---- */
+/* ---- FILE SIZE / OPTIONAL REDUCTION AT EXPORT ----
+   The part is never reduced while you work on it. Export can write a lighter copy of every link instead
+   ("Smaller file" on the Export page) — that only changes the downloaded file. */
 function triCount(g){ return g ? (g.index ? g.index.count/3 : g.attributes.position.count/3) : 0; }
 function estStlBytes(tris){ return 84 + tris*CONST.STL_BYTES_PER_TRI; }
 function fmtBytes(b){ return b>=1048576 ? (b/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(b/1024))+' KB'; }
-function chainTriBudget(){
-  const links=Math.max(1,UI.count||1);
-  let ovTris=0, ovCount=0;
-  for(const [i,o] of S.overrides){ if(i<links){ ovTris+=triCount(o.geo); ovCount++; } }
-  return {links, baseLinks:Math.max(0,links-ovCount), baseFull:triCount(S.geoPristine||S.baseGeo), ovTris, ovCount};
+/* the geometry link i is exported from: a swapped-in model, or the part (the full, mirrored one for a half part) */
+function exportSource(i){
+  const o=S.overrides.get(i);
+  return o ? o.geo : (UI.mirrorEnabled&&S.mirroredBaseGeo) ? S.mirroredBaseGeo : S.baseGeo;
 }
-function actualChainTris(){
-  if(S.poses.length){ let t=0; for(let i=0;i<S.poses.length;i++) t+=triCount(linkGeom(i)); return t; }
-  const b=chainTriBudget(); return b.baseFull*b.baseLinks+b.ovTris;
+function exportVertCap(){ return UI.exportReduce ? Math.max(50, Math.round(+UI.exportMaxVerts)||CONST.MAX_VERTS_PER_LINK) : 0; }   // 0 = full detail
+function updateExportEstimate(){
+  if(!S.baseGeo){ UI.exportEst=''; return; }
+  const links=S.poses.length||Math.max(1,UI.count||1), cap=exportVertCap();
+  let full=0, lite=0;
+  for(let i=0;i<links;i++){
+    const t=triCount(exportSource(i));
+    full+=t; lite+= cap ? Math.min(t,2*cap) : t;         // a closed mesh has about two triangles per vertex
+  }
+  const partV=S.baseGeo.attributes.position.count*((UI.mirrorEnabled&&S.mirroredBaseGeo)?2:1);
+  const size=t=>fmtBytes(estStlBytes(Math.round(t))), n=x=>x.toLocaleString();
+  UI.exportEst = !cap
+    ? `Full detail: <b>${n(partV)}</b> vertices per link · the file will be about <b>${size(full)}</b> as STL (${links} links).`
+      + (estStlBytes(full)>CONST.BIG_FILE_MB*1048576 ? ` <span style="color:var(--warn)">That is a large file — tick “Smaller file” for a lighter one.</span>` : '')
+    : lite<full
+      ? `${partV>cap ? `At most <b>${n(cap)}</b> of ${n(partV)} vertices per link` : `Swapped links reduced to at most <b>${n(cap)}</b> vertices`} · the file will be about <b>${size(lite)}</b> as STL instead of ${size(full)} (${links} links). Only the file is reduced — the part here keeps its detail.`
+      : `Nothing to reduce — the link has only ${n(partV)} vertices. The file will be about <b>${size(full)}</b> as STL (${links} links).`;
 }
-function baseVertCount(){ const g=S.geoPristine||S.baseGeo; return g?g.attributes.position.count:0; }
-function updateSimEstimate(){
-  if(!S.baseGeo){ UI.simEst=''; return; }
-  const {links,baseLinks,baseFull,ovTris,ovCount}=chainTriBudget();
-  const pct=UI.simPct/100;
-  const fullV=baseVertCount(), tgtV=Math.max(4,Math.round(fullV*(1-pct)));
-  const tgtTotal=Math.round(baseFull*(1-pct)*baseLinks+ovTris);
-  const fullTotal=Math.round(baseFull*baseLinks+ovTris);
-  const note = ovCount?`, ${ovCount} custom`:'';
-  UI.simEst = pct>0
-    ? `${fullV.toLocaleString()} → <b>${tgtV.toLocaleString()}</b> verts/link · whole chain ≈ <b>${fmtBytes(estStlBytes(tgtTotal))}</b> as STL (${links} links${note})`
-    : `${fullV.toLocaleString()} verts/link · whole chain ≈ ${fmtBytes(estStlBytes(fullTotal))} as STL (${links} links${note})`;
+/* a lighter copy of a link, for the file. Welded first: the simplifier only removes vertices that triangles share,
+   and a mirrored half or a swapped-in model can come with every triangle on its own. */
+async function reducedCopy(src, cap){
+  const welded=weldByPosition(src);
+  const g=await decimateToVertexTarget(welded,cap);
+  welded.dispose();
+  return g;
 }
 function swapBaseGeometry(geo, {weld=true}={}){
   if(weld) geo = weldByPosition(geo);
@@ -2326,49 +2329,6 @@ async function decimateToVertexTarget(src,target){
   try{ return await meshoptDecimate(src,target); }
   catch(e){ console.warn('meshopt simplify unavailable, falling back to clustering:',e);
             return clusterDecimateToTarget(src,target); }
-}
-async function applyVertexTarget(target){
-  if(!S.baseGeo) return;
-  if(!S.geoPristine) S.geoPristine=S.baseGeo.clone();      // keep a full-detail master
-  target=Math.max(8,Math.round(target));
-  UI.simApplyDisabled=true; status('Simplifying…');
-  await new Promise(r=>setTimeout(r,10));                   // let the panel repaint
-  let g;
-  try{ g=await decimateToVertexTarget(S.geoPristine,target); }
-  catch(e){ status('Simplify failed: '+e.message,'err'); UI.simApplyDisabled=false; return; }
-  swapBaseGeometry(g);
-  const full=S.geoPristine.attributes.position.count, now=S.baseGeo.attributes.position.count;
-  S.appliedPct=Math.round(100*(1-now/full));
-  S.meshDirty=true; UI.simResetDisabled=false; UI.simApplyDisabled=false;
-  regen(); updateSimEstimate();
-  status(`Simplified ${full.toLocaleString()} → ${now.toLocaleString()} verts/link.`,'ok');
-}
-async function applySimplify(){               // manual: reduce by the % slider
-  const pct=UI.simPct/100;
-  if(pct<=0){ status('Set a reduction above 0% first.','warn'); return; }
-  const full=(S.geoPristine||S.baseGeo).attributes.position.count;
-  await applyVertexTarget(full*(1-pct));
-}
-function restoreDetail(){
-  if(!S.geoPristine) return;
-  swapBaseGeometry(S.geoPristine.clone());
-  S.appliedPct=0; S.meshDirty=true; UI.simResetDisabled=true;
-  regen(); updateSimEstimate(); status('Full detail restored.','ok');
-}
-async function autoFitReduction(apply){
-  if(!S.baseGeo) return;
-  const cap=Math.max(50,(UI.simMaxVerts||CONST.MAX_VERTS_PER_LINK));
-  const full=baseVertCount();
-  UI.simPct = full>cap ? Math.min(98,Math.round(100*(1-cap/full))) : 0;
-  updateSimEstimate();
-  if(!apply) return;
-  if(full<=cap){ if(S.appliedPct>0) restoreDetail(); return; }
-  if(S.baseGeo.attributes.position.count<=cap && S.appliedPct>0) return;   // already at/under cap
-  await applyVertexTarget(cap);
-}
-function syncSimMode(){
-  if(UI.simAuto) autoFitReduction(false);     // refresh the shown target (auto-applies when you confirm orientation)
-  else updateSimEstimate();
 }
 
 /* ======================================================================== *
@@ -2496,7 +2456,7 @@ function replaceSelectedLink(file){
   r.onload=()=>parseMeshFile(r.result,file.name).then(g=>{
     clearOverride(idx);
     S.overrides.set(idx,{geo:fitReplacement(g),name:file.name,meshId:null,adjust:new THREE.Matrix4()});   // meshId filled in on save
-    regen(); showSelection(); updateSwapUI(); updateSimEstimate();
+    regen(); showSelection(); updateSwapUI(); updateExportEstimate();
     status(`Link #${idx} → “${file.name}”.`,'ok');
   }).catch(e=>status('Replace failed: '+e.message,'err'));
   r.readAsArrayBuffer(file);
@@ -3101,21 +3061,17 @@ function decoFuse(){
   const shades=Math.min(8, (linkColored?(d.preFuseColor.shades||2):1) + distinctColors(d.geo));
   UI.colorShades=shades; applyColorShades();
   S.meshDirty=true;
-  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }   // pre-simplify master belonged to the plain link
-  S.appliedPct=0; UI.simResetDisabled=true; UI.simPct=0;
   if(S.colorCode===DEFAULT_COLOR_CODE) setColorCode(DECO_COLOR_CODE);
   if(pivotGizmo) buildGizmos();
   setAnchorRanges(); updateExportLabel();
-  if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();
+  updateExportEstimate();
   history.clear();
   decoSyncVisibility();
   markDone('deco');
   const v=S.baseGeo.attributes.position.count;
   UI.decoFuseOut = `✓ Fused (${res.mode==='csg'?'boolean union':'merged shells'}) in ${Math.round(performance.now()-t0)} ms — the link is now <b>${v.toLocaleString()}</b> verts in ${shades} colours.`
     + (res.note?`<br><span style="color:var(--warn)">${res.note}</span>`:'')
-    + (touching?'':'<br><span style="color:var(--bad)">⚠ the object doesn\'t touch the link — it will print as a loose piece.</span>')
-    + (UI.simAuto && v>UI.simMaxVerts?`<br>Auto-simplify will reduce it to ≤ ${UI.simMaxVerts.toLocaleString()} verts/link when the chain is built.`:'');
-  UI.decoNeedCap = (UI.simAuto && v>UI.simMaxVerts) ? Math.ceil(v/500)*500 : 0;
+    + (touching?'':'<br><span style="color:var(--bad)">⚠ the object doesn\'t touch the link — it will print as a loose piece.</span>');
   status(`Object fused into the link (${v.toLocaleString()} verts).`, touching?'ok':'warn');
   return true;
 }
@@ -3129,12 +3085,10 @@ function decoUnfuse(){
   }
   d.preFuseColor=null; d.fused=false;
   S.meshDirty=true;
-  if(S.geoPristine){ S.geoPristine.dispose(); S.geoPristine=null; }
-  S.appliedPct=0; UI.simResetDisabled=true; UI.simPct=0;
   if(pivotGizmo) buildGizmos();
   setAnchorRanges(); updateExportLabel();
-  if(UI.simAuto) autoFitReduction(false); else updateSimEstimate();
-  UI.decoFuseOut=''; UI.decoNeedCap=0;
+  updateExportEstimate();
+  UI.decoFuseOut='';
   history.clear();
   decoSyncVisibility(); decoChanged(true);
   if(S.poses.length && (S.uiStep==='s3'||S.uiStep==='s4')) regen();
@@ -3166,7 +3120,7 @@ function decoDispose(){
     for(const g of new Set([d.geo,d.work,d.linkPreFuse])) if(g){ g.disposeBoundsTree?.(); g.dispose(); }
   }
   S.deco=null;
-  if(UI){ UI.decoLoaded=false; UI.decoFused=false; UI.decoCanEdit=false; UI.decoInfo=''; UI.decoTouch=''; UI.decoMate=''; UI.decoFuseOut=''; UI.decoNeedCap=0; }
+  if(UI){ UI.decoLoaded=false; UI.decoFused=false; UI.decoCanEdit=false; UI.decoInfo=''; UI.decoTouch=''; UI.decoMate=''; UI.decoFuseOut=''; }
 }
 /* project / config load */
 async function decoRestore(c){
@@ -3405,9 +3359,7 @@ function chainApp(){
     partSize:40,                       // the part's longest side (mm) — scales the brush / morph sliders
     unitScale:1, colorShades:2, purify:false, partX:0, partY:0, partZ:0,
     symOut:'',
-    simAuto:true, simMaxVerts:2000, simPct:0,
-    simEst:'', dbgOut:'Load a part to see its vertex / triangle count.',
-    simResetDisabled:true, simApplyDisabled:false,
+    dbgOut:'Load a part to see its vertex / triangle count.',
     showVerts:false, showWire:false,
     cutHeight:0, cutMax:20, cutPreview:false, hasCutUndo:false,
     s1nextDisabled:true,
@@ -3447,12 +3399,13 @@ function chainApp(){
     swapFileBtnDisabled:true, swapClearDisabled:true, swapClearAllDisabled:true,
     gizmoActive:false, gizmoMode:'translate',
     exportOut:'', exportLabel:'⬇ Download STL', exportFmt:'auto',
+    exportReduce:false, exportMaxVerts:CONST.MAX_VERTS_PER_LINK, exportEst:'',   // optional: fewer vertices per link, in the file only
     /* ----- decorate (optional step) ----- */
     decoLoaded:false, decoFused:false, decoCanEdit:false, decoBusy:false,
     decoInfo:'', decoTouch:'', decoMate:'', decoFuseOut:'', decoColorSource:'',
     decoShades:2, decoMaxVerts:6000, decoFlatColor:'#ffcc33', decoLinkColor:'#e6e6e6', linkHasColor:false,
     decoPos:{x:0,y:0,z:0}, decoRot:{x:0,y:0,z:0}, decoScale:{x:1,y:1,z:1}, decoSize:0,
-    decoSpace:'local', decoSnap:false, decoSink:1, decoMateOn:true, decoFuseMode:'csg', decoNeedCap:0,
+    decoSpace:'local', decoSnap:false, decoSink:1, decoMateOn:true, decoFuseMode:'csg',
     /* ----- render toggles ----- */
     xray:false, section:false, sectionZ:100, sectionZval:'',
     glLost:'',                         // '' | 'wait' | 'stuck' — the browser took the WebGL context away (see "WebGL context loss")
@@ -3489,9 +3442,8 @@ function chainApp(){
       this.$watch('startR', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
       this.$watch('spacing', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
       this.$watch('plate', ()=>{ if(!this._loading) debounceRegen(); });
-      this.$watch('simAuto', ()=>syncSimMode());
-      this.$watch('simMaxVerts', ()=>{ if(this.simAuto)autoFitReduction(false); else updateSimEstimate(); });
-      this.$watch('simPct', ()=>updateSimEstimate());
+      this.$watch('exportReduce', ()=>updateExportEstimate());
+      this.$watch('exportMaxVerts', ()=>updateExportEstimate());
       this.$watch('sectionZ', ()=>updateSectionPlane());
       this.$watch('cutHeight', v=>{              // moving the slider shows the cut plane — no separate "preview" toggle
         if(v>0 && S.baseGeo && S.uiStep==='s1') this.cutPreview=true; else if(!(v>0)) clearCutPreview();
@@ -3543,7 +3495,6 @@ function chainApp(){
       this.$watch('decoMateOn',()=>decoChanged(true));
       this.$watch('exportFmt', ()=>updateExportLabel());
 
-      syncSimMode();          // controls start in the (default) automatic mode
       refreshProjects();
       status('Choose a 3D file — or drop it onto the view.');
     },
@@ -3598,7 +3549,6 @@ function chainApp(){
     /* everything that has to be true of the part before any later page works on it (safe to repeat) */
     async preparePart(){
       if(!S.baseGeo) return false;
-      if(this.simAuto) await autoFitReduction(true);   // reduce the part BEFORE any chain work
       if(!anchorsValid()) stackLinks();                // no offset yet → the pivot follows the part as it is now
       markDone('s1'); unlock('s2');
       buildGizmos(); setAnchorRanges();
@@ -3611,7 +3561,6 @@ function chainApp(){
     },
     async s2Next(){
       if(!S.baseGeo||!anchorsValid())return;
-      if(this.simAuto) await autoFitReduction(true);   // safety: ensure reduced before the first build
       markDone('s2'); unlock('s3'); unlock('s4');
       ensureScaleEditor(); ensureColorEditor(); ensurePathEditor();
       openStep('s3');                                  // builds + frames the chain
@@ -3619,7 +3568,7 @@ function chainApp(){
     s3Next(){
       if(this.steps.s3.locked) return;
       markDone('s3'); openStep('s4');
-      if(this.simAuto) autoFitReduction(true); else updateSimEstimate();
+      updateExportEstimate();
       updateSwapUI();
       if(this.chainState==='bad') status(`${this.chainBad} links overlap — they would fuse when printed. Fix them on the Chain page first.`,'err');
       else status('Ready to export.','ok');
@@ -3631,14 +3580,12 @@ function chainApp(){
     get brushMax(){ return Math.max(5, Math.ceil(this.partSize*0.75)); },
     get reachMax(){ return Math.max(5, Math.ceil(this.partSize*1.5)); },
     get amountMax(){ return Math.max(2, Math.ceil(this.partSize*0.5)); },
-    get simSummary(){ return this.simAuto ? `auto · max ${(+this.simMaxVerts||0).toLocaleString()} vertices per link` : 'manual'; },
     autoAlign, nudge, setArm, layFlat, detectSymmetry, centerPart,
     alignZ(){ alignInPlane(); S.partX=0; this.partX=0; S.partY=0; this.partY=0; S.partZ=0; this.partZ=0; frameCamera(); status('Auto-rotated: longest axis on X.','ok'); },
     resetRotXY(){ rotatePartX(0); this.partX=0; rotatePartY(0); this.partY=0; },
     toggleSym(){ S.symVisible=!S.symVisible; if(S.symGroup)S.symGroup.visible=S.symVisible; },
     toggleVerts(){ this.showVerts=!this.showVerts; updateDebugViz(); },
     toggleWire(){ this.showWire=!this.showWire; updateDebugViz(); },
-    applySimplify, restoreDetail,
     cutFlatBottom, undoCutFlat,
 
     /* ---- loop sculpt actions ---- */
@@ -3714,8 +3661,8 @@ function chainApp(){
     /* ---- step 4 actions ---- */
     chooseSwapFile(){ $('swapFileInput').click(); },
     onSwapFileInput(e){ if(e.target.files[0]){ replaceSelectedLink(e.target.files[0]); e.target.value=''; } },
-    swapClear(){ if(S.selectedLink!=null&&S.overrides.has(S.selectedLink)){ clearOverride(S.selectedLink); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('Link reverted to the base part.'); } },
-    swapClearAll(){ for(const i of [...S.overrides.keys()]) clearOverride(i); regen(); showSelection(); updateSwapUI(); updateSimEstimate(); status('All links reverted to the base part.'); },
+    swapClear(){ if(S.selectedLink!=null&&S.overrides.has(S.selectedLink)){ clearOverride(S.selectedLink); regen(); showSelection(); updateSwapUI(); updateExportEstimate(); status('Link reverted to the base part.'); } },
+    swapClearAll(){ for(const i of [...S.overrides.keys()]) clearOverride(i); regen(); showSelection(); updateSwapUI(); updateExportEstimate(); status('All links reverted to the base part.'); },
     gizmoSetMode, gizmoResetAdjust,
 
     /* ---- decorate actions ---- */

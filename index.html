@@ -122,21 +122,6 @@
             </div>
           </details>
 
-          <details class="fold">
-            <summary>Detail level <span class="sum" x-text="simSummary"></span></summary>
-            <div class="foldbody">
-              <p class="hint">A detailed part × many links makes a huge, slow file. The part is reduced once, before the chain is built.</p>
-              <div class="row">
-                <label class="check"><input type="checkbox" x-model="simAuto"> <span>Automatic — keep each link under</span></label>
-                <input x-model.number="simMaxVerts" type="number" min="50" step="250" :disabled="!simAuto"><span class="unit">vertices</span></div>
-              <div class="srow" x-show="!simAuto"><label>Reduce by (%)</label><input x-model.number="simPct" type="range" min="0" max="99" step="1"><input x-model.number="simPct" type="number" min="0" max="99" step="5"></div>
-              <p class="hint" id="simEst" x-html="simEst"></p>
-              <div class="btnrow">
-                <button class="ghost sm" @click="applySimplify()" :disabled="simApplyDisabled" x-show="!simAuto">Reduce now</button>
-                <button class="ghost sm" @click="restoreDetail()" :disabled="simResetDisabled">Restore full detail</button>
-              </div>
-            </div>
-          </details>
 
           <details class="fold">
             <summary>Symmetry &amp; mirroring <span class="sum" x-text="mirrorEnabled ? 'half part · mirrored' : (halfDetected ? 'half a part?' : '')"></span></summary>
@@ -461,9 +446,6 @@
             <button class="ghost sm" @click="decoUnfuse()" x-show="decoFused" :disabled="!decoCanEdit">✎ Edit placement</button>
           </div>
           <p class="hint" x-html="decoFuseOut"></p>
-          <div class="btnrow" x-show="decoFused && decoNeedCap">
-            <button class="ghost sm" @click="simMaxVerts=decoNeedCap; decoNeedCap=0">Keep this detail (raise the limit to <span x-text="decoNeedCap.toLocaleString()"></span> vertices per link)</button>
-          </div>
           <p class="hint" x-show="decoFused">The chain now uses the decorated link. <b>Edit placement</b> brings back the plain link and the movable object (sculpt or cut edits made after fusing are dropped).</p>
         </div>
       </section>
@@ -625,7 +607,6 @@
             <button class="ghost sm" @click="goStep('s3')">Fix on the Chain page</button></p>
           <p class="verdict warn" x-show="chainState==='unchecked'">Overlaps not checked yet. <button class="ghost sm" @click="recheck()">Check now</button></p>
           <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm plate.</p>
-          <p class="hint" x-show="simEst">Detail: <span x-html="simEst"></span></p>
         </div>
 
         <div class="row"><label>Chain direction</label>
@@ -639,6 +620,10 @@
             <option value="stl">STL — no colours</option>
           </select></div>
         <p class="hint" x-show="partHasColor">For multi-colour printing choose <b>OBJ</b>: slicers such as Bambu Studio and OrcaSlicer read its colours and map them to filaments.</p>
+        <div class="row">
+          <label class="check"><input type="checkbox" x-model="exportReduce"> <span>Smaller file — at most</span></label>
+          <input x-model.number="exportMaxVerts" type="number" min="50" step="250" :disabled="!exportReduce"><span class="unit">vertices per link</span></div>
+        <p class="hint" id="exportEst" x-html="exportEst"></p>
         <p class="hint">Press <b x-text="exportLabel"></b> below when you're ready.</p>
         <p class="verdict ok" id="exportOut" x-show="exportOut" x-html="exportOut"></p>
 

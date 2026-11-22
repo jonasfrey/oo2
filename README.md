@@ -8,7 +8,8 @@ helper to orient 3d objects in a repetitive pattern array so that they dont touc
 four steps, shown in the bar at the top of the side panel; each page has one main button bottom right.
 
 1. **Part** — load one link, lay it flat ("Pick the bottom face" = one click on the part).
-   everything else (fine rotation, flatten bottom, detail level, symmetry / half part, colours, file units) is folded away.
+   everything else (fine rotation, flatten bottom, symmetry / half part, colours, file units) is folded away.
+   the part is never reduced: it keeps every vertex of the file you loaded.
    the optional extras live here too: Sculpt, Relief from an image, Morph along the chain, Add an object.
 2. **Joints** — the next link starts exactly on top of the part; move it along X / Y (arrows in the view, or the sliders)
    until the fit check says the two no longer touch. height step and pivot point are folded away.
@@ -16,6 +17,8 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
    **⇄ Reverse** builds the chain the other way round: same path, every link turned half a turn (also on the Export page).
    fine-tune joints, size / colour along the chain (preset buttons + code) and the custom path are folded away.
 4. **Export** — file format + download; swapping individual links is folded away.
+   **Smaller file** (off by default) writes every link with at most N vertices — only the downloaded file is reduced,
+   the part and the chain in the app keep their detail. the page shows how big the file will be either way.
 
 projects (open / save / delete, project file .json) are behind the **Projects** / **Save** buttons in the header.
 
