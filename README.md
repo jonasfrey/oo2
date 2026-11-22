@@ -23,6 +23,11 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
 4. **Export** — file format + download; swapping individual links is folded away.
    **Smaller file** (off by default) writes every link with at most N vertices — only the downloaded file is reduced,
    the part and the chain in the app keep their detail. the page shows how big the file will be either way.
+   formats: STL, **3MF**, OBJ, GLB, PLY. 3MF carries colours the way Snapmaker Orca / OrcaSlicer / Bambu Studio keep colour
+   painting: every triangle names its filament (most used colour = filament 1). import it with File → Import.
+   **At most N colours** (on, 4) merges similar colours until N are left — one per filament; the page lists them, numbered.
+   a part without colours of its own still gets them in the file once "Colour along the chain" returns a colour for a link
+   (Two colours, Gradient, Rainbow …): one colour per link.
 
 projects (open / save / delete, project file .json) are behind the **Projects** / **Save** buttons in the header.
 

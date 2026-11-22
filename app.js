@@ -1296,6 +1296,9 @@ const COLOR_PRESETS = {
   plain    : COLOR_DOC + `
 // Every link keeps its own colour.
 return base;`,
+  stripes  : COLOR_DOC + `
+// Two colours in turn — on a plain part too (each colour becomes a filament).
+return n_it % 2 ? '#ff7a1a' : '#f2f2f2';`,
   gradient : COLOR_DOC + `
 // Blend from one colour to another along the chain (r, g, b each 0 … 1).
 const from = [0.20, 0.60, 1.00], to = [1.00, 0.30, 0.50];
@@ -1690,14 +1693,14 @@ function syncBed(){
 /* ======================================================================== *
  *  STEP 4 — MERGE + EXPORT  /  SAVE-LOAD CONFIG
  * ======================================================================== */
-const EXPORT_FORMATS=['stl','obj','ply','glb','gltf'];
+const EXPORT_FORMATS=['stl','3mf','obj','ply','glb','gltf'];
 function exportFormat(){
   if(UI && EXPORT_FORMATS.includes(UI.exportFmt)) return UI.exportFmt;     // picked explicitly
   const f=(S.loadFormat||'stl').toLowerCase();
   if(!EXPORT_FORMATS.includes(f)) return 'stl';
-  return (f==='stl' && hasVColor(S.baseGeo)) ? 'obj' : f;               // auto: source format, but never drop colours
+  return (f==='stl' && chainHasColours()) ? 'obj' : f;                  // auto: source format, but never drop colours
 }
-function updateExportLabel(){ UI.exportLabel='⬇ Download '+exportFormat().toUpperCase(); }
+function updateExportLabel(){ UI.exportFmtNow=exportFormat(); UI.exportLabel='⬇ Download '+UI.exportFmtNow.toUpperCase(); }
 // OBJ vertex colours are sRGB by convention (OBJLoader converts them to linear on import),
 // while our colour attributes are linear — convert back so slicers see the real colours.
 const linToSRGB=c=>{ c=Math.min(1,Math.max(0,c)); return c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055; };
@@ -1715,9 +1718,12 @@ function writeOBJ(geo){
   else    for(let i=0;i<n;i+=3)         out.push('f '+v(i)+' '+v(i+1)+' '+v(i+2));
   return out.join('\n')+'\n';
 }
-async function encodeChain(mesh, geo, fmt){
+async function encodeChain(mesh, geo, fmt, ranges, pal){
   const title=(UI.projectTitle||S.meshName||'').trim().replace(/[^\w.-]+/g,'_');
   const base=(title && title!=='part' ? title : 'articulated')+'-chain';
+  if(fmt==='3mf'){
+    return {blob:new Blob([await write3MF(geo, ranges, pal, base)],{type:'model/3mf'}), name:base+'.3mf'};
+  }
   if(fmt==='stl'){
     const dv=new STLExporter().parse(mesh,{binary:true});
     return {blob:new Blob([dv],{type:'application/octet-stream'}), name:base+'.stl'};
@@ -1738,10 +1744,11 @@ async function encodeChain(mesh, geo, fmt){
 async function exportChain(){
   if(!S.poses.length){status('Build the chain first.','err');return;}
   const fmt=exportFormat();
-  const keepColor = fmt!=='stl' && hasVColor(S.baseGeo);   // STL has no color; every other format keeps it
+  const keepColor = fmt!=='stl' && chainHasColours();      // STL has no color; every other format keeps it
   const cap=exportVertCap(), lite=new Map();               // "Smaller file": source geometry → its lighter copy (made once, used for every link)
+  const pal = keepColor ? chainPalette(exportColourCap(fmt)) : null;   // the colours of the file (null: a plain part)
   if(cap){ status('Reducing the links for the file…'); await new Promise(r=>setTimeout(r,10)); }   // let the status line repaint
-  const geos=[];
+  const geos=[], ranges=[], rgb=[0,0,0];
   for(let i=0;i<S.poses.length;i++){
     let src=exportSource(i);                 // the part (mirrored to the full link for a half part), or a swapped-in model
     if(cap && src.attributes.position.count>cap){
@@ -1754,28 +1761,189 @@ async function exportChain(){
     for(const a of Object.keys(g.attributes)) if(a!=='position'&&a!=='normal'&&!(keepColor&&a==='color')) g.deleteAttribute(a);
     if(keepColor && !g.getAttribute('color'))   // an uncolored override → white-fill so the merge's attrs match
       g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count*3).fill(1),3));
-    if(keepColor && S.colorFn){                  // bake the per-part colour callback into the exported colours
-      const ca=g.getAttribute('color'), nor=S.poses.length>1?i/(S.poses.length-1):0;
-      let rv; try{ rv=S.colorFn(i,nor,{r:1,g:1,b:1}); }catch(e){ rv=undefined; }
-      if(isInvert(rv)){                          // palette swap → reflect through SWAP_SUM (same as the viewport shader)
-        for(let v=0;v<ca.count;v++) ca.setXYZ(v, SWAP_SUM.x-ca.getX(v), SWAP_SUM.y-ca.getY(v), SWAP_SUM.z-ca.getZ(v));
-      } else {                                   // a colour → multiply tint
-        const tint=new THREE.Color(); applyColorValue(tint.copy(WHITE), rv);
-        for(let v=0;v<ca.count;v++) ca.setXYZ(v, ca.getX(v)*tint.r, ca.getY(v)*tint.g, ca.getZ(v)*tint.b);
+    if(keepColor){                               // bake the per-part colour callback into the exported colours, then keep to the file's colours
+      const ca=g.getAttribute('color'), paint=linkColourer(i);
+      for(let v=0;v<ca.count;v++){
+        paint(ca.getX(v),ca.getY(v),ca.getZ(v),rgb);
+        if(pal.limited){ const c=pal.colours[pal.index(rgb[0],rgb[1],rgb[2])]; ca.setXYZ(v,c.r,c.g,c.b); }
+        else ca.setXYZ(v,rgb[0],rgb[1],rgb[2]);
       }
     }
     if(!g.attributes.normal) g.computeVertexNormals();   // keep every solid's attribute set identical for the merge
+    ranges.push(g.attributes.position.count);
     geos.push(g);
   }
   const merged=BufferGeometryUtils.mergeGeometries(geos,false);
   geos.forEach(g=>g.dispose()); lite.forEach(g=>g.dispose());
   const mesh=new THREE.Mesh(merged, keepColor?partMaterial(merged):undefined);
   const tris=merged.index?merged.index.count/3:merged.attributes.position.count/3;
-  const {blob,name}=await encodeChain(mesh, merged, fmt);
+  const {blob,name}=await encodeChain(mesh, merged, fmt, ranges, pal);
   merged.dispose();
   download(blob,name);
-  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles · ${fmtBytes(blob.size)}${lite.size?' (reduced)':''}.`;
+  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles${pal?` · ${pal.colours.length} colour${pal.colours.length>1?'s':''}`:''} · ${fmtBytes(blob.size)}${lite.size?' (reduced)':''}.`;
   status(name.toUpperCase().split('.').pop()+' downloaded: '+name,'ok');
+}
+
+/* ---- THE COLOURS OF THE FILE ----
+   A slicer wants a handful of flat colours, one per filament. The chain can carry more: every link's own colours,
+   swapped or tinted link by link ("Colour along the chain"). For the file, similar colours are merged until at most
+   N are left ("At most N colours" on the Export page; 3MF always has a limit, it stores filament numbers). */
+const MAX_FILAMENTS=16;
+function exportColourCap(fmt){     // 0 = every colour as it is
+  const n=Math.min(MAX_FILAMENTS, Math.max(1, Math.round(+UI.exportMaxColours)||4));
+  return UI.exportLimitColours ? n : fmt==='3mf' ? MAX_FILAMENTS : 0;
+}
+/* Does the chain carry colours? A coloured part always does. A plain part does once "Colour along the chain" gives
+   some link a colour of its own — the alternating look of the default code only tells the links apart in the view. */
+function chainHasColours(){
+  if(!S.baseGeo) return false;
+  if(hasVColor(S.baseGeo)) return true;
+  if(!S.colorFn) return false;
+  const n=S.poses.length||Math.max(1,(UI&&UI.count)||1), base=CONST.LINK_OK_COLOR, c=new THREE.Color();
+  for(let i=0;i<n;i++){
+    let v; try{ v=S.colorFn(i, n>1?i/(n-1):0, {r:base.r,g:base.g,b:base.b}); }catch(e){ continue; }
+    if(isInvert(v)) continue;
+    applyColorValue(c.copy(base), v);
+    if(Math.abs(c.r-base.r)+Math.abs(c.g-base.g)+Math.abs(c.b-base.b)>1e-4) return true;
+  }
+  return false;
+}
+/* what link i does to a colour of the part — the same rule as the chain shader: swap the palette, or tint.
+   A plain part has no colours to change: the link is the one colour it has in the view (without the marker of link 1). */
+function linkColourer(i){
+  if(!hasVColor(S.baseGeo)){
+    linkPaint(i, S.poses.length, CONST.LINK_OK_COLOR, false);
+    const c=_tmpCol.clone();
+    return (r,g,b,out)=>{ out[0]=c.r; out[1]=c.g; out[2]=c.b; };
+  }
+  let rv;
+  if(S.colorFn){ try{ rv=S.colorFn(i, S.poses.length>1?i/(S.poses.length-1):0, {r:1,g:1,b:1}); }catch(e){} }
+  if(isInvert(rv)) return (r,g,b,out)=>{ out[0]=SWAP_SUM.x-r; out[1]=SWAP_SUM.y-g; out[2]=SWAP_SUM.z-b; };
+  const t=new THREE.Color(); applyColorValue(t.copy(WHITE), rv);
+  return (r,g,b,out)=>{ out[0]=r*t.r; out[1]=g*t.g; out[2]=b*t.b; };
+}
+const srgb8=c=>Math.round(linToSRGB(c)*255);
+const colourKey=(r,g,b)=>(srgb8(r)<<16)|(srgb8(g)<<8)|srgb8(b);
+/* The chain's colours, most used first: {colours:[{r,g,b (linear), hex, share}], limited, index(r,g,b) → which of them}.
+   With a limit n, similar colours are merged (weighted k-means on the sRGB values) until n are left. */
+function chainPalette(n){
+  const hist=new Map(), own=new Map(), rgb=[0,0,0];      // final colour → [r,g,b,weight] · source geometry → its own colours
+  for(let i=0;i<S.poses.length;i++){
+    const g=exportSource(i);
+    if(!own.has(g)){
+      const ca=g.getAttribute('color'), m=new Map();
+      if(!ca) m.set(0,[1,1,1,g.attributes.position.count]);          // an uncoloured swapped-in link counts as white
+      else for(let v=0;v<ca.count;v++){
+        const r=ca.getX(v), gg=ca.getY(v), b=ca.getZ(v), k=colourKey(r,gg,b), e=m.get(k);
+        if(e) e[3]++; else m.set(k,[r,gg,b,1]);
+      }
+      own.set(g,[...m.values()]);
+    }
+    const paint=linkColourer(i);
+    for(const [r,gg,b,w] of own.get(g)){
+      paint(r,gg,b,rgb);
+      const k=colourKey(rgb[0],rgb[1],rgb[2]), e=hist.get(k);
+      if(e) e[3]+=w; else hist.set(k,[rgb[0],rgb[1],rgb[2],w]);
+    }
+  }
+  let cols=[...hist.values()];
+  const limited = n>0 && cols.length>n;
+  if(limited) cols=mergeColours(cols,n);
+  cols.sort((a,b)=>b[3]-a[3]);
+  const total=cols.reduce((t,c)=>t+c[3],0)||1;
+  const colours=cols.map(c=>({r:c[0],g:c[1],b:c[2], share:c[3]/total,
+    hex:'#'+[c[0],c[1],c[2]].map(v=>srgb8(v).toString(16).padStart(2,'0')).join('').toUpperCase()}));
+  const sr=colours.map(c=>[linToSRGB(c.r),linToSRGB(c.g),linToSRGB(c.b)]), near=new Map();
+  const index=(r,g,b)=>{
+    const k=colourKey(r,g,b); let i=near.get(k);
+    if(i===undefined){
+      const x=linToSRGB(r), y=linToSRGB(g), z=linToSRGB(b); let bd=Infinity; i=0;
+      for(let c=0;c<sr.length;c++){ const d=(x-sr[c][0])**2+(y-sr[c][1])**2+(z-sr[c][2])**2; if(d<bd){ bd=d; i=c; } }
+      near.set(k,i);
+    }
+    return i;
+  };
+  return {colours, limited, found:hist.size, index};
+}
+function mergeColours(cols, k){
+  const P=cols.map(c=>[linToSRGB(c[0]),linToSRGB(c[1]),linToSRGB(c[2])]), W=cols.map(c=>c[3]), n=P.length;
+  const d2=(a,b)=>(a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2;
+  /* start from the most used colour, then keep adding the colour that is both far from the chosen ones and much used */
+  const cen=[P[W.indexOf(Math.max(...W))].slice()], near=new Float64Array(n).fill(Infinity);
+  while(cen.length<k){
+    let best=0, bs=-1;
+    for(let i=0;i<n;i++){ near[i]=Math.min(near[i], d2(P[i],cen[cen.length-1])); const sc=near[i]*W[i]; if(sc>bs){ bs=sc; best=i; } }
+    cen.push(P[best].slice());
+  }
+  const assign=new Int32Array(n);
+  for(let it=0;it<24;it++){
+    let moved=false;
+    for(let i=0;i<n;i++){ let bc=0, bd=Infinity; for(let c=0;c<k;c++){ const d=d2(P[i],cen[c]); if(d<bd){ bd=d; bc=c; } } if(assign[i]!==bc){ assign[i]=bc; moved=true; } }
+    const sum=cen.map(()=>[0,0,0,0]);
+    for(let i=0;i<n;i++){ const s=sum[assign[i]]; s[0]+=P[i][0]*W[i]; s[1]+=P[i][1]*W[i]; s[2]+=P[i][2]*W[i]; s[3]+=W[i]; }
+    for(let c=0;c<k;c++) if(sum[c][3]) cen[c]=[sum[c][0]/sum[c][3], sum[c][1]/sum[c][3], sum[c][2]/sum[c][3]];
+    if(!moved && it>0) break;
+  }
+  const w=new Float64Array(k); for(let i=0;i<n;i++) w[assign[i]]+=W[i];
+  const toLin=c=>c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055,2.4);
+  return cen.map((c,i)=>[toLin(c[0]),toLin(c[1]),toLin(c[2]),w[i]]).filter(c=>c[3]>0);
+}
+
+/* 3MF: the mesh and — for a coloured chain — the filament every triangle is printed with. Slicers of the Bambu Studio /
+   OrcaSlicer family (Snapmaker Orca among them) keep that as colour painting: paint_color on a triangle, "4" = filament 1,
+   "8" = 2, "0C" = 3, "1C" = 4 … The most used colour is filament 1 and stays unpainted: it is the object's own filament.
+   The colours also go in as a standard 3MF colour group, for programs that read those. */
+const paintCode=f=> f===1 ? '4' : f===2 ? '8' : (f-3).toString(16).toUpperCase()+'C';
+async function write3MF(geo, ranges, pal, title){
+  const {zipSync, strToU8}=await import('three/addons/libs/fflate.module.js');
+  const pos=geo.getAttribute('position'), col=pal&&geo.getAttribute('color'), idx=geo.index;
+  const enc=new TextEncoder(), parts=[]; let lines=[], bytes=0;
+  const flush=()=>{ if(lines.length){ const u=enc.encode(lines.join('\n')+'\n'); parts.push(u); bytes+=u.length; lines=[]; } };
+  const put=l=>{ lines.push(l); if(lines.length>=20000) flush(); };
+  const num=v=>String(+v.toFixed(4)), esc=t=>String(t).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'})[c]);
+  put('<?xml version="1.0" encoding="UTF-8"?>');
+  put('<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
+    +(col?' xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"':'')+'>');
+  put(`<metadata name="Title">${esc(title)}</metadata>`);
+  put('<metadata name="Application">Articulated Spiral Builder</metadata>');
+  if(col) put(`<metadata name="Description">${esc(pal.colours.map((c,i)=>`filament ${i+1}: ${c.hex}`).join(', '))}</metadata>`);
+  put('<resources>');
+  if(col) put('<m:colorgroup id="2">'+pal.colours.map(c=>`<m:color color="${c.hex}"/>`).join('')+'</m:colorgroup>');
+  put(`<object id="1" type="model" name="${esc(title)}"${col?' pid="2" pindex="0"':''}>`);
+  put('<mesh>'); put('<vertices>');
+  /* vertices: one per position within a link (a colour seam has two on the same spot — the slicer wants a closed surface) */
+  const remap=new Uint32Array(pos.count); let nv=0, v=0;
+  for(const count of ranges){
+    const seen=new Map();
+    for(const end=v+count; v<end; v++){
+      const x=num(pos.getX(v)), y=num(pos.getY(v)), z=num(pos.getZ(v)), k=x+' '+y+' '+z;
+      let i=seen.get(k);
+      if(i===undefined){ i=nv++; seen.set(k,i); put(`<vertex x="${x}" y="${y}" z="${z}"/>`); }
+      remap[v]=i;
+    }
+  }
+  put('</vertices>'); put('<triangles>');
+  const nt=idx?idx.count:pos.count, at=i=>idx?idx.getX(i):i;
+  const ci=v=>pal.index(col.getX(v),col.getY(v),col.getZ(v));
+  for(let t=0;t<nt;t+=3){
+    const a=at(t), b=at(t+1), c=at(t+2), ra=remap[a], rb=remap[b], rc=remap[c];
+    if(ra===rb||rb===rc||ra===rc) continue;                     // collapsed by the weld
+    let l=`<triangle v1="${ra}" v2="${rb}" v3="${rc}"`;
+    if(col){
+      const pa=ci(a), pb=ci(b), pc=ci(c), f = pb===pc ? pb : pa;          // the colour two of its corners agree on
+      if(f>0) l+=` pid="2" p1="${f}" paint_color="${paintCode(f+1)}"`;
+    }
+    put(l+'/>');
+  }
+  put('</triangles>'); put('</mesh>'); put('</object>'); put('</resources>');
+  put('<build><item objectid="1"/></build>'); put('</model>');
+  flush();
+  const model=new Uint8Array(bytes); let o=0; for(const u of parts){ model.set(u,o); o+=u.length; }
+  return zipSync({
+    '[Content_Types].xml': strToU8('<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>'),
+    '_rels/.rels': strToU8('<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>'),
+    '3D/3dmodel.model': model,
+  }, {level:6});
 }
 function download(blob,name){
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name;
@@ -2282,8 +2450,19 @@ function exportSource(i){
   return o ? o.geo : (UI.mirrorEnabled&&S.mirroredBaseGeo) ? S.mirroredBaseGeo : S.baseGeo;
 }
 function exportVertCap(){ return UI.exportReduce ? Math.max(50, Math.round(+UI.exportMaxVerts)||CONST.MAX_VERTS_PER_LINK) : 0; }   // 0 = full detail
+/* the colours the file will have (Export page): the legend under "At most N colours" */
+function updateExportPalette(){
+  const fmt=exportFormat();
+  UI.chainColoured=chainHasColours();
+  if(S.uiStep!=='s4' || !S.poses.length || fmt==='stl' || !UI.chainColoured){ UI.exportPalette=[]; return; }
+  const pal=chainPalette(exportColourCap(fmt));
+  UI.exportPalette=pal.colours.map(c=>({hex:c.hex, share:Math.max(1,Math.round(c.share*100))}));
+  UI.exportFound=pal.found;
+}
 function updateExportEstimate(){
   if(!S.baseGeo){ UI.exportEst=''; return; }
+  updateExportLabel();        // "automatic" follows the chain's colours
+  updateExportPalette();
   const links=S.poses.length||Math.max(1,UI.count||1), cap=exportVertCap();
   let full=0, lite=0;
   for(let i=0;i<links;i++){
@@ -2574,6 +2753,7 @@ function openStep(id, force){
   if(kind==='chain'){
     if(anchorsValid() && (changed || !S.poses.length)) regen();
     if(changed) setView('iso');
+    if(id==='s4') updateExportEstimate();          // file size and colours, as things stand now
     return;
   }
   updateMeshChips(); UI.chipCollide='';              // the HUD describes the single part again
@@ -3541,7 +3721,8 @@ function chainApp(){
     swapSel:'No link selected yet.',
     swapFileBtnDisabled:true, swapClearDisabled:true, swapClearAllDisabled:true,
     gizmoActive:false, gizmoMode:'translate',
-    exportOut:'', exportLabel:'⬇ Download STL', exportFmt:'auto',
+    exportOut:'', exportLabel:'⬇ Download STL', exportFmt:'auto', exportFmtNow:'stl',   // exportFmtNow: what 'auto' comes to
+    exportLimitColours:true, exportMaxColours:4, exportPalette:[], exportFound:0, chainColoured:false,     // at most N colours in the file — one per filament
     exportReduce:false, exportMaxVerts:CONST.MAX_VERTS_PER_LINK, exportEst:'',   // optional: fewer vertices per link, in the file only
     /* ----- decorate (optional step) ----- */
     decoLoaded:false, decoFused:false, decoCanEdit:false, decoBusy:false,
@@ -3637,7 +3818,10 @@ function chainApp(){
       this.$watch('decoSpace', v=>decoGizmo.setSpace(v));
       this.$watch('decoSnap',  v=>{ decoGizmo.snap=v; });
       this.$watch('decoMateOn',()=>decoChanged(true));
-      this.$watch('exportFmt', ()=>updateExportLabel());
+      { const f=localStorage.getItem('exportFmt'); if(f==='auto' || EXPORT_FORMATS.includes(f)) this.exportFmt=f; }   // the slicer decides the format — remember it
+      this.$watch('exportFmt', v=>{ localStorage.setItem('exportFmt',v); updateExportLabel(); updateExportEstimate(); });
+      this.$watch('exportLimitColours', ()=>updateExportEstimate());
+      this.$watch('exportMaxColours', ()=>updateExportEstimate());
 
       refreshProjects();
       status('Choose a 3D file — or drop it onto the view.');
@@ -3731,6 +3915,11 @@ function chainApp(){
     toggleVerts(){ this.showVerts=!this.showVerts; updateDebugViz(); },
     toggleWire(){ this.showWire=!this.showWire; updateDebugViz(); },
     cutFlatBottom, undoCutFlat,
+    get exportKeepsColour(){ return this.chainColoured && this.exportFmtNow!=='stl'; },
+    get exportColourNote(){
+      const n=this.exportPalette.length, all=this.exportFound;
+      return all>n ? `The chain has ${all} colours — similar ones are merged into these ${n}:` : `The chain has ${n} colour${n>1?'s':''}:`;
+    },
     onCutFold(open){ this.cutFold=open; if(open) startCutPreview(true); else clearCutPreview(); },
     get cutInfo(){ const off=this.cutHeight-this.cutMin, all=this.cutMax-this.cutMin; return `Cuts off the lowest ${off.toFixed(1)} mm of ${all.toFixed(1)} mm — ${Math.round(100*off/all)} % of the height.`; },
 

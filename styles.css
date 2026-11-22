@@ -127,6 +127,12 @@
   details.help > summary{cursor:pointer;color:var(--accent);font-size:12px;width:max-content}
 
   /* status cards (fit check, chain summary) */
+  /* the colours of the exported file, numbered like the filaments */
+  .palette{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+  .pal{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+    padding:3px 8px 3px 4px;font-size:11.5px;color:var(--soft);font-variant-numeric:tabular-nums}
+  .pal i{width:16px;height:16px;border-radius:4px;border:1px solid rgba(255,255,255,.3)}
+  .pal b{color:var(--ink)}
   .statcard{border-left:3px solid var(--accent)}
   .statcard.ok{border-left-color:var(--accent2)}
   .statcard.bad{border-left-color:var(--bad)}

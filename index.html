@@ -581,9 +581,11 @@
         <details class="fold">
           <summary>Colour along the chain</summary>
           <div class="foldbody">
-            <p class="hint">Give the links different colours. Colours are saved in OBJ, GLB and PLY files; STL has no colour.</p>
+            <p class="hint">Give the links different colours. Colours are saved in 3MF, OBJ, GLB and PLY files; STL has no colour.</p>
+            <p class="hint" x-show="!partHasColor">This part has no colours of its own: a link gets a colour in the file — and so its own filament — once the code returns one for it (Two colours, Gradient, Rainbow). The alternating look of “Alternate” only tells the links apart in the view.</p>
             <div class="btnrow">
               <button class="ghost sm" @click="colorPreset('alternate')">Alternate</button>
+              <button class="ghost sm" @click="colorPreset('stripes')">Two colours</button>
               <button class="ghost sm" @click="colorPreset('plain')">All the same</button>
               <button class="ghost sm" @click="colorPreset('gradient')">Gradient</button>
               <button class="ghost sm" @click="colorPreset('rainbow')">Rainbow</button>
@@ -637,12 +639,25 @@
         <div class="row"><label>File format</label>
           <select x-model="exportFmt">
             <option value="auto">Automatic (same as the part)</option>
+            <option value="3mf">3MF — with colours, as filaments</option>
             <option value="obj">OBJ — with colours</option>
             <option value="glb">GLB — with colours</option>
             <option value="ply">PLY — with colours</option>
             <option value="stl">STL — no colours</option>
           </select></div>
-        <p class="hint" x-show="partHasColor">For multi-colour printing choose <b>OBJ</b>: slicers such as Bambu Studio and OrcaSlicer read its colours and map them to filaments.</p>
+        <p class="hint" x-show="chainColoured">For multi-colour printing choose <b>3MF</b>: Snapmaker Orca, OrcaSlicer and Bambu Studio take its colours as colour painting — filament 1, 2, 3 … in the order shown below. With <b>OBJ</b> those slicers ask how to map the colours.</p>
+        <div x-show="exportKeepsColour">
+          <div class="row">
+            <label class="check"><input type="checkbox" x-model="exportLimitColours"> <span>At most</span></label>
+            <input x-model.number="exportMaxColours" type="number" min="1" max="16" step="1" :disabled="!exportLimitColours"><span class="unit">colours — one per filament</span></div>
+          <p class="hint" x-show="exportPalette.length" x-text="exportColourNote"></p>
+          <div class="palette" x-show="exportPalette.length">
+            <template x-for="(c,i) in exportPalette" :key="i">
+              <span class="pal"><i :style="'background:'+c.hex"></i><b x-text="i+1"></b><span x-text="c.hex+' · '+c.share+' %'"></span></span>
+            </template>
+          </div>
+          <p class="hint" x-show="exportFmtNow==='3mf' && exportPalette.length">In the slicer use <b>File → Import</b> (not “Open project”) and give filament 1, 2, 3 … these colours. Filament 1 is the object's own filament; the others arrive as colour painting.</p>
+        </div>
         <div class="row">
           <label class="check"><input type="checkbox" x-model="exportReduce"> <span>Smaller file — at most</span></label>
           <input x-model.number="exportMaxVerts" type="number" min="50" step="250" :disabled="!exportReduce"><span class="unit">vertices per link</span></div>
