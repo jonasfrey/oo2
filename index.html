@@ -686,7 +686,7 @@
   <div id="panelResize" title="Drag to resize"></div>
 
   <!-- ============================ VIEWPORT ============================ -->
-  <main id="view" :class="{ armed: !!arm }">
+  <main id="view" :class="{ armed: !!arm, glgone: !!glLost }">
     <div id="canvasWrap"></div>
     <div id="hud">
       <div class="chip" id="chipMesh" x-show="chipMesh" x-html="chipMesh"></div>
@@ -717,6 +717,19 @@
     </div>
     <div id="status" x-show="statusMsg" x-text="statusMsg" :class="statusKind"></div>
     <div id="mouseHint" x-show="hasPart" x-text="mouseHint"></div>
+    <!-- the browser took the WebGL context away: the 3D picture is gone until it hands it back -->
+    <div id="glLost" x-show="glLost" role="alert">
+      <h3>The 3D view has stopped</h3>
+      <p>The browser took its graphics (WebGL) context away. That can happen after locking the screen, after sleep, or when the graphics driver stumbles. Your part and settings are untouched.</p>
+      <p x-show="glLost==='wait'">Waiting for the browser to give it back…</p>
+      <div x-show="glLost==='stuck'">
+        <p>It hasn't come back yet. <b>Save</b> the project, then <b>reload</b> the page. If the 3D view is still missing after that, restart the browser — in Chrome, type <code>chrome://restart</code> into the address bar (your tabs come back).</p>
+        <div class="row">
+          <button class="ghost" @click="quickSave()" :disabled="!hasPart">Save project</button>
+          <button @click="location.reload()">Reload page</button>
+        </div>
+      </div>
+    </div>
     <div id="drop" :class="{ hide: dropHide, hot: dropHot }"><div class="inner">
       <div class="arrow">⬇</div>
       <div class="t1">Drop a 3D file here</div>
@@ -766,6 +779,17 @@
         <input id="cfgInput" type="file" accept=".json" hidden @change="onCfgInput($event)">
       </div>
     </div>
+  </div>
+</div>
+
+<!-- shown by app.js in place of the app when the browser has no WebGL context to give, so the 3D view can't start -->
+<div id="noWebgl" role="alert" hidden>
+  <div class="dialog">
+    <h2>The 3D view can't start</h2>
+    <p>This browser isn't handing out a graphics (WebGL) context right now, and the app can't work without one.</p>
+    <p>Most often the browser's graphics process has crashed a few times in a row — for example after locking the screen or waking the computer — and the browser has switched 3D off until it is restarted. <b>Restart the browser</b>: in Chrome, type <code>chrome://restart</code> into the address bar (your tabs come back).</p>
+    <p class="hint">Still here after a restart? Check that hardware acceleration is switched on in the browser's settings.</p>
+    <div class="dlgfoot"><span class="hint">Saved projects are not affected.</span><button onclick="location.reload()">Try again</button></div>
   </div>
 </div>
 

@@ -23,6 +23,11 @@ the 3d view always looks at — and orbits around — the middle of what the pag
 and keeps doing so while that changes (more links, other shape, turned part). right-drag moves the view away on purpose;
 Iso / Top / Front / Side or the cube bring it back.
 
+if the browser takes the WebGL context away (graphics driver reset, its GPU process crashing — on some linux + nvidia
+machines when the screen is locked), the view says so and draws again by itself once the context is back.
+if it doesn't come back: Save → reload the page → restart the browser (chrome: `chrome://restart`).
+a browser with no WebGL at all gets an explanation instead of a dead page.
+
 
 
 # todo 

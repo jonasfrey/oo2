@@ -242,3 +242,13 @@
   #status.ok{color:var(--accent2)}
   #mouseHint{position:absolute;right:14px;bottom:12px;z-index:3;font-size:11px;color:var(--muted);
     background:rgba(22,27,34,.75);border-radius:8px;padding:6px 10px;pointer-events:none}
+  /* WebGL context lost: a notice in the middle of the (now empty) view; no WebGL at all: the same, in place of the app */
+  #glLost{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:7;width:min(460px,calc(100% - 36px));
+    background:var(--panel);border:1px solid var(--warn);border-radius:14px;padding:16px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  #view.glgone canvas{opacity:0}   /* a canvas without its context is drawn white (plus a "broken" icon) */
+  #glLost h3{font-size:15px;color:var(--warn)}
+  #glLost p,#noWebgl p:not(.hint){margin:8px 0;line-height:1.5;color:var(--soft)}
+  #glLost .row{justify-content:flex-end;margin:12px 0 0}
+  #noWebgl{position:fixed;inset:0;z-index:60;display:grid;place-items:center}
+  #noWebgl[hidden]{display:none}
+  #noWebgl h2{color:var(--warn);margin-bottom:4px}

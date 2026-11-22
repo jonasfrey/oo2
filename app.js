@@ -66,7 +66,12 @@ const status = (msg,kind='') => { if(UI){ UI.statusMsg=msg; UI.statusKind=kind; 
 
 /* ================================ SCENE ================================== */
 const wrap = document.getElementById('canvasWrap');
-const renderer = new THREE.WebGLRenderer({antialias:true});
+/* No WebGL to be had (switched off, or the browser gave up on its graphics process — then only restarting the
+   browser brings it back): nothing here can work, so put up the explanation from index.html instead of a dead page. */
+const renderer = (()=>{
+  try{ return new THREE.WebGLRenderer({antialias:true}); }
+  catch(e){ $('app').remove(); $('noWebgl').hidden=false; throw e; }
+})();
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.localClippingEnabled = true;          // for the section / layer view
 wrap.appendChild(renderer.domElement);
@@ -169,6 +174,24 @@ function resize(){
   camera.aspect=(r.width/r.height)||1; camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(wrap); resize();
+
+/* ---- WebGL context loss ----
+   The browser can take the context away at any moment: a graphics driver reset, its GPU process crashing (on some
+   Linux + NVIDIA machines whenever the screen is locked). three.js then just stops drawing, and draws again by itself
+   once the browser hands the context back — but without a word the view sits there blank. So say what happened, and
+   if the context doesn't come back, what to do about it (the notice is #glLost in index.html). */
+let glStuckTimer=0;
+renderer.domElement.addEventListener('webglcontextlost', ()=>{
+  if(!UI) return;
+  UI.glLost='wait';
+  clearTimeout(glStuckTimer);
+  glStuckTimer=setTimeout(()=>{ if(UI.glLost) UI.glLost='stuck'; }, 4000);   // a restarted GPU process is back within a second or two
+});
+renderer.domElement.addEventListener('webglcontextrestored', ()=>{
+  clearTimeout(glStuckTimer);
+  resize();
+  if(UI){ UI.glLost=''; status('The 3D view is back.','ok'); }
+});
 
 (function loop(){requestAnimationFrame(loop);controls.update();decoGizmo.update();renderer.render(scene,camera);viewCube&&viewCube.update();})();
 
@@ -3432,6 +3455,7 @@ function chainApp(){
     decoSpace:'local', decoSnap:false, decoSink:1, decoMateOn:true, decoFuseMode:'csg', decoNeedCap:0,
     /* ----- render toggles ----- */
     xray:false, section:false, sectionZ:100, sectionZval:'',
+    glLost:'',                         // '' | 'wait' | 'stuck' — the browser took the WebGL context away (see "WebGL context loss")
     /* ----- projects (header buttons + dialog) ----- */
     projectName:'', projMsg:'', projMsgErr:false, projects:[], projectId:null, hasServer:true,
     projectTitle:'',                   // name of the project that is open (projectName is the editable field)
