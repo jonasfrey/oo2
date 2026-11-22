@@ -523,6 +523,10 @@
           <p class="verdict ok" x-show="chainState==='ok'">✓ No links touch — it will print as a moving chain.</p>
           <div x-show="chainState==='bad'">
             <p class="verdict bad">✗ <span x-text="chainBad"></span> links overlap (shown red) — they would fuse together.</p>
+            <p class="hint" x-show="overlapCount">The <span style="color:#fff35c">yellow lines</span> in the view are where they run into each other, <span x-text="overlapCount"></span> <span x-text="overlapCount>1 ? 'places, each with a ring around it' : 'place, with a ring around it'"></span>.
+              <button class="ghost sm" @click="showOverlap()" x-text="overlapLabel ? 'Next ›' : 'Show where'">Show where</button>
+              <button class="ghost sm" x-show="overlapLabel" @click="setView('iso'); overlapLabel=''">Whole chain</button>
+              <span x-show="overlapLabel" x-text="overlapLabel"></span></p>
             <p class="hint">Open <a class="link" @click="$refs.jointFold.open=true; $refs.jointFold.scrollIntoView({block:'nearest',behavior:'smooth'})">Fine-tune joints</a> and move the links a little further apart until the red clears.<span x-show="shape==='spiral'"> For a spiral, a larger start radius or loop spacing also helps.</span></p>
           </div>
           <p class="verdict warn" x-show="chainState==='unchecked'">Overlaps not checked yet — that takes a moment with this many links.
@@ -631,7 +635,8 @@
           <div class="bigstat"><b x-text="chainLenVal">—</b><span x-text="chainLenSub"></span></div>
           <p class="verdict ok" x-show="chainState==='ok'">✓ No links touch.</p>
           <p class="verdict bad" x-show="chainState==='bad'">✗ <span x-text="chainBad"></span> links overlap — they would fuse when printed.
-            <button class="ghost sm" @click="goStep('s3')">Fix on the Chain page</button></p>
+            <button class="ghost sm" @click="goStep('s3')">Fix on the Chain page</button>
+            <button class="ghost sm" x-show="overlapCount" @click="showOverlap()" x-text="overlapLabel ? 'Next ›' : 'Show where'">Show where</button></p>
           <p class="verdict warn" x-show="chainState==='unchecked'">Overlaps not checked yet. <button class="ghost sm" @click="recheck()">Check now</button></p>
           <p class="verdict warn" x-show="chainOff">⚠ Footprint <span x-text="chainFoot"></span> — larger than the <span x-text="plate"></span> mm print bed.</p>
         </div>

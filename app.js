@@ -9,6 +9,9 @@ import { STLExporter }     from 'three/addons/exporters/STLExporter.js';
 import { GLTFExporter }    from 'three/addons/exporters/GLTFExporter.js';
 import { PLYExporter }     from 'three/addons/exporters/PLYExporter.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, MeshBVH }
   from 'three-mesh-bvh';
 import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg';
@@ -198,10 +201,24 @@ function makeBed(size){
 let bed = makeBed(CONST.DEFAULT_PLATE_MM); scene.add(bed);
 const axes = new THREE.AxesHelper(40); scene.add(axes);
 
+/* ---- where links overlap: the line along which their surfaces cross, drawn on top of everything in a width that
+   does not shrink with distance, and a ring around every such spot so it is found when the whole chain is in view ---- */
+const overlapViz = new THREE.Group(); overlapViz.visible=false; scene.add(overlapViz);
+const OVERLAP_COL = { line:0xfff35c, edge:0x1a1206 };
+const overlapMats = [ new LineMaterial({color:OVERLAP_COL.edge, linewidth:6, transparent:true, opacity:.75, depthTest:false, depthWrite:false}),
+                      new LineMaterial({color:OVERLAP_COL.line, linewidth:3, transparent:true, depthTest:false, depthWrite:false}) ];
+const overlapRing = (()=>{                     // a ring that keeps its size on screen
+  const c=document.createElement('canvas'); c.width=c.height=96;
+  const x=c.getContext('2d');
+  for(const [w,col] of [[11,'rgba(26,18,6,.8)'],[6,'#fff35c']]){ x.beginPath(); x.arc(48,48,36,0,Math.PI*2); x.lineWidth=w; x.strokeStyle=col; x.stroke(); }
+  return new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c), depthTest:false, depthWrite:false, sizeAttenuation:false, transparent:true});
+})();
+
 function resize(){
   const r=wrap.getBoundingClientRect();
   renderer.setPixelRatio(Math.min(devicePixelRatio,2));   // browser zoom changes it; the canvas itself is stretched to the view by CSS
   renderer.setSize(r.width,r.height,false);
+  for(const m of overlapMats) m.resolution.set(r.width||1, r.height||1);   // their line width is in screen pixels
   camera.aspect=(r.width/r.height)||1; camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(wrap); resize();
@@ -246,6 +263,7 @@ const S = {
   poses:[],              // Matrix4 per link (world)
   chain:null,            // InstancedMesh preview
   collideSet:new Set(),  // indices currently colliding
+  chainOverlap:null, mateOverlap:null, overlapShown:null, overlapSpots:[],   // where links overlap ({lines, spots}): in the chain / on the Joints page / on show now
   symPlanes:[],          // detected mirror planes {p:Vector3, n:Vector3, score}
   symGroup:null,         // THREE.Group holding the mirror-line visuals
   symVisible:true,
@@ -1672,7 +1690,7 @@ function checkCollisions(poses){
       const k=cx*73856093^cy*19349663; let arr=grid.get(k); if(!arr){arr=[];grid.set(k,arr);} arr.push(i);
     }
   }
-  const bad=new Set(), tested=new Set(); let pairs=0;
+  const bad=new Set(), tested=new Set(), where={lines:[],spots:[]}; let pairs=0;
   const inv=new THREE.Matrix4();
   for(const arr of grid.values()){
     for(let a=0;a<arr.length;a++)for(let bI=a+1;bI<arr.length;bI++){
@@ -1681,10 +1699,72 @@ function checkCollisions(poses){
       if(!boxes[i].intersectsBox(boxes[j]))continue;
       pairs++;
       inv.copy(linkWorldMatrix(i)).invert().multiply(linkWorldMatrix(j));   // bring link j into link i's frame
-      if(linkGeom(i).boundsTree.intersectsGeometry(linkGeom(j),inv)){ bad.add(i); bad.add(j); }
+      if(linkGeom(i).boundsTree.intersectsGeometry(linkGeom(j),inv)){
+        bad.add(i); bad.add(j);
+        overlapSpots(linkGeom(i), linkGeom(j), inv, linkWorldMatrix(i), `link ${i+1} and link ${j+1}`, where);
+      }
     }
   }
-  return {bad,pairs};
+  return {bad,pairs,where};
+}
+/* Where two meshes run into each other. `toA` brings mesh B into A's frame, `world` takes A's frame to the scene.
+   Adds to `where`: lines — the crossing line as x,y,z pairs of segment ends — and spots — one {center, radius, label}
+   per place they meet (two links can touch in several places). */
+const OVERLAP_MAX_SEGMENTS=20000, OVERLAP_MAX_TOTAL=200000;   // line pieces per pair / in all: plenty for the picture, and a bound when many detailed links sit inside each other
+function overlapSpots(geoA, geoB, toA, world, label, where){
+  if(!geoA.boundsTree) geoA.boundsTree=new MeshBVH(geoA);
+  if(!geoB.boundsTree) geoB.boundsTree=new MeshBVH(geoB);
+  if(!geoA.boundingBox) geoA.computeBoundingBox();
+  const seg=new THREE.Line3(), a=new THREE.Vector3(), b=new THREE.Vector3(), mid=new THREE.Vector3();
+  const reach=Math.max(1, geoA.boundingBox.getSize(new THREE.Vector3()).length()*0.08);   // pieces of line closer than this belong to the same place
+  const spots=[], first=where.lines.length;
+  geoA.boundsTree.bvhcast(geoB.boundsTree, toA, { intersectsTriangles:(t1,t2)=>{
+    if(!t1.intersectsTriangle(t2, seg, true)) return false;
+    a.copy(seg.start).applyMatrix4(world); b.copy(seg.end).applyMatrix4(world);
+    if(a.distanceToSquared(b)<1e-12) return false;                  // touching in a point (or lying flat on each other): nothing to draw
+    where.lines.push(a.x,a.y,a.z, b.x,b.y,b.z);
+    mid.addVectors(a,b).multiplyScalar(.5);
+    let s=null;
+    for(let k=spots.length-1;k>=0;k--){                             // the place this piece belongs to; it may join two that were apart so far
+      if(spots[k].box.distanceToPoint(mid)>=reach) continue;
+      if(!s) s=spots[k]; else { s.box.union(spots[k].box); spots.splice(k,1); }
+    }
+    if(!s){ s={box:new THREE.Box3(), label}; spots.push(s); }
+    s.box.expandByPoint(a); s.box.expandByPoint(b);
+    return where.lines.length-first >= OVERLAP_MAX_SEGMENTS*6 || where.lines.length >= OVERLAP_MAX_TOTAL*6;   // true ends the search (the place is still marked)
+  }});
+  for(let again=true; again;){                                      // places that grew into each other are one place
+    again=false;
+    for(let x=0; x<spots.length && !again; x++) for(let y=x+1; y<spots.length; y++){
+      if(!spots[x].box.clone().expandByScalar(reach).intersectsBox(spots[y].box)) continue;
+      spots[x].box.union(spots[y].box); spots.splice(y,1); again=true; break;
+    }
+  }
+  for(const s of spots){ s.center=s.box.getCenter(new THREE.Vector3()); s.radius=s.box.getSize(new THREE.Vector3()).length()/2; where.spots.push(s); }
+}
+/* show them (or, with nothing to show, clear the picture) */
+function setOverlapViz(where){
+  for(const o of [...overlapViz.children]){ overlapViz.remove(o); if(o.isLineSegments2) o.geometry.dispose(); }
+  S.overlapSpots = where ? where.spots : [];
+  if(UI){ UI.overlapCount=S.overlapSpots.length; UI.overlapAt=0; UI.overlapLabel=''; }
+  if(!where || !where.lines.length){ overlapViz.visible=false; return; }
+  const g=new LineSegmentsGeometry().setPositions(where.lines);
+  overlapMats.forEach((m,k)=>{ const l=new LineSegments2(g,m); l.renderOrder=1000+k; l.frustumCulled=false; overlapViz.add(l); });
+  for(const s of where.spots){ const r=new THREE.Sprite(overlapRing); r.position.copy(s.center); r.scale.setScalar(0.055); r.renderOrder=1002; overlapViz.add(r); }
+  overlapViz.visible=true;
+}
+/* "Show where": look at the next overlap from close up, from the side the view is on now */
+function showOverlap(step=1){
+  const n=S.overlapSpots.length; if(!n) return;
+  UI.overlapAt = ((UI.overlapLabel ? UI.overlapAt+step : 0)%n+n)%n;
+  const s=S.overlapSpots[UI.overlapAt];
+  const dir=camera.position.clone().sub(controls.target).normalize();
+  const half=THREE.MathUtils.degToRad(camera.fov)/2, r=Math.max(s.radius*3, 6);          // the spot and some of the links around it
+  controls.enableDamping=false; controls.update(); controls.enableDamping=true;
+  controls.target.copy(s.center);
+  camera.position.copy(s.center).addScaledVector(dir, r/Math.sin(Math.min(half, Math.atan(Math.tan(half)*camera.aspect))));
+  controls.update();
+  UI.overlapLabel=`${UI.overlapAt+1} of ${n}: ${s.label}`;
 }
 
 let regenTimer=null;
@@ -1698,9 +1778,10 @@ function regen(force){
   if(S.selectedLink!=null && S.selectedLink>=poses.length){ S.selectedLink=null; updateSwapUI(); }
   renderChain(poses);
   const doCheck = force || poses.length<=CONST.COLLISION_AUTO_MAX;
-  let bad=new Set(), pairs=0;
-  if(doCheck) ({bad,pairs}=checkCollisions(poses));
+  let bad=new Set(), pairs=0, where=null;
+  if(doCheck) ({bad,pairs,where}=checkCollisions(poses));
   S.collideSet=bad;
+  S.chainOverlap=where; syncOverlapViz();
   paintChain(poses, bad);            // re-tint, flagging collisions red
   recolorLSChain(bad);
   recolorOverrides(bad); showSelection();
@@ -1720,7 +1801,7 @@ function regen(force){
   let msg=`${poses.length} links · footprint ${fs.x.toFixed(0)}×${fs.y.toFixed(0)} mm.`;
   let kind = bad.size? 'err':'ok';
   if(!doCheck){ msg+=' Collision check skipped (large count) — press “Re-check”.'; kind=''; }
-  else if(bad.size) msg+=` ${bad.size} links collide (red).`;
+  else if(bad.size) msg+=` ${bad.size} links overlap — the yellow lines show where.`;
   else msg+=' No mesh overlaps.';
   if(off){msg+=` ⚠ Larger than the ${plate} mm print bed.`; if(!bad.size)kind='';}
   status(msg,kind);
@@ -2518,15 +2599,18 @@ function syncMatePreview(){
   const show=UI.matePreviewOn && S.uiStep==='s2' && !!S.partMesh && S.partMesh.visible;
   S.matePreview.visible=show;
   syncMateGizmo();
-  if(!show){ UI.mateOut=''; UI.mateState=''; return; }
+  if(!show){ UI.mateOut=''; UI.mateState=''; S.mateOverlap=null; syncOverlapViz(); return; }
   const M=relMate(), stacked=!anchorsValid();
   S.matePreview.matrix.copy(M); S.matePreview.updateMatrixWorld(true);
   let hit=stacked;
   if(!hit){ ensureBVH(); hit=S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,M); }
+  S.mateOverlap=null;
+  if(hit && !stacked){ S.mateOverlap={lines:[],spots:[]}; overlapSpots(S.baseGeo, S.baseGeo, M, new THREE.Matrix4(), 'this link and the next', S.mateOverlap); }
+  syncOverlapViz();
   S.matePreview.material.color.set(hit?0xff6b6b:CONST.MATE_COLOR);
   UI.mateState = hit ? 'bad' : 'ok';
   UI.mateOut = stacked ? 'The next link sits exactly on top of this one. Move it along X or Y until the two no longer touch.'
-    : hit ? 'The two links still touch — they would fuse when printed. Move the next link a little further.'
+    : hit ? 'The two links still touch — they would fuse when printed. The yellow line shows where; move the next link a little further.'
     : 'The two links don’t touch — they print as separate, moving pieces.';
 }
 /* the X / Y arrows sit on the middle of the next link, wherever it is shown */
@@ -3609,8 +3693,14 @@ function showStepView(id){
 const PART_STEPS=new Set(['s1','s2','proj','sculpt','height','lsculpt','deco']);
 /* single part (part steps) vs whole chain (steps 3/4) — also re-applied after every chain rebuild,
    so a regen() triggered from a part step (simplify, cut, colour code, …) doesn't cover the part */
+/* the overlap picture of the page: the chain's on Chain / Export, the two links' on Joints */
+function syncOverlapViz(){
+  const id=S.uiStep, want = id==='s2' ? S.mateOverlap : PART_STEPS.has(id) ? null : S.chainOverlap;
+  if(want!==S.overlapShown){ S.overlapShown=want; setOverlapViz(want); }
+}
 function syncViewVisibility(){
   const id=S.uiStep, partMode=PART_STEPS.has(id);
+  syncOverlapViz();
   if(S.partMesh) S.partMesh.visible = partMode && !!S.baseGeo;
   if(pivotGizmo) pivotGizmo.visible = pivotShown();
   if(S.symGroup) S.symGroup.visible = partMode && S.symVisible;
@@ -3823,6 +3913,7 @@ function chainApp(){
     /* ----- step 3 ----- */
     chainLenVal:'—', chainLenSub:'',
     chainState:'', chainBad:0, chainFoot:'', chainOff:false,   // filled by regen(): '' | 'ok' | 'bad' | 'unchecked'
+    overlapCount:0, overlapAt:0, overlapLabel:'',              // the places where links overlap, and the one "Show where" is looking at
     shape:'straight', count:14, startR:25, spacing:16, plate:CONST.DEFAULT_PLATE_MM,
     scaleErr:'', scaleErrColor:'', colorErr:'', colorErrColor:'', pathErr:'', pathErrColor:'', solveOut:'',
     s3nextDisabled:true,
@@ -4029,7 +4120,7 @@ function chainApp(){
     toggleSym(){ S.symVisible=!S.symVisible; if(S.symGroup)S.symGroup.visible=S.symVisible; },
     toggleVerts(){ this.showVerts=!this.showVerts; updateDebugViz(); },
     toggleWire(){ this.showWire=!this.showWire; updateDebugViz(); },
-    applyCut, removeCut,
+    applyCut, removeCut, showOverlap,
     get exportKeepsColour(){ return this.chainColoured && this.exportFmtNow!=='stl'; },
     get exportColourNote(){
       const n=this.exportPalette.length, all=this.exportFound;

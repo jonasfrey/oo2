@@ -20,6 +20,8 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
 2. **Joints** — the next link starts exactly on top of the part; move it along X / Y (arrows in the view, or the sliders)
    until the fit check says the two no longer touch. height step and pivot point are folded away.
 3. **Chain** — shape + number of links, with a status card (length, overlaps, plate fit).
+   overlapping links turn red, and the view shows where: a yellow line along which the two surfaces cross and a ring around
+   every such place; "Show where" goes from one to the next. the Joints page shows the same for the part and its neighbour.
    **⇄ Reverse** builds the chain the other way round: same path, every link turned half a turn (also on the Export page).
    fine-tune joints, size / colour along the chain (preset buttons + code) and the custom path are folded away.
 4. **Export** — file format + download; swapping individual links is folded away.
