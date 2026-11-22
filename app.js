@@ -133,6 +133,7 @@ scene.add(lsXform);
 lsXform.addEventListener('dragging-changed', e => { controls.enabled = !e.value; });
 lsXform.addEventListener('objectChange', lsOnGizmoChange);
 const lsGroup = new THREE.Group(); lsGroup.visible = false; scene.add(lsGroup);
+const lsTwinGroup = new THREE.Group(); lsGroup.add(lsTwinGroup);   // the mirrored twins of morph points (see lsSyncTwins)
 
 /* ---- joints step: X / Y arrows on the previewed next link — dragging them sets the link offset ---- */
 const mateXform = new TransformControls(camera, renderer.domElement);
@@ -608,18 +609,15 @@ function rayPart(ev){ pointerNDC(ev); return S.partMesh? raycaster.intersectObje
  * ======================================================================== */
 const sculpt = new SculptController({ scene, camera, renderer, controls, raycaster });
 
-// resolve the mirror plane: detected symmetry by default, manual X/Y/Z + offset override
+// the part's mirror plane {p, n}: detected symmetry by default, manual X/Y/Z + offset override
+const axisPlane=(ax,off)=>{ const n=new THREE.Vector3(ax==='x'?1:0, ax==='y'?1:0, ax==='z'?1:0); return {p:n.clone().multiplyScalar(off||0), n}; };
+function partMirrorPlane(){
+  return (!UI.sculptManual && S.symPlanes[0]) ? {p:S.symPlanes[0].p.clone(), n:S.symPlanes[0].n.clone()}
+                                               : axisPlane(UI.sculptAxis||'x', UI.sculptOffset);
+}
 function applySculptMirror(){
-  let pt, nrm;
-  if(!UI.sculptManual && S.symPlanes[0]){
-    pt = S.symPlanes[0].p.clone();
-    nrm = S.symPlanes[0].n.clone();
-  }else{
-    const ax = UI.sculptAxis || 'x';
-    nrm = new THREE.Vector3(ax==='x'?1:0, ax==='y'?1:0, ax==='z'?1:0);
-    pt = new THREE.Vector3(); pt[ax] = UI.sculptOffset || 0;
-  }
-  sculpt.setMirror(pt, nrm, UI.sculptMirror);
+  const {p,n}=partMirrorPlane();
+  sculpt.setMirror(p, n, UI.sculptMirror);
 }
 function enterSculpt(){
   if(!S.baseGeo) return;
@@ -856,52 +854,53 @@ function symScore(pts,c,n){
 }
 const angleModPi=a=>{a=((a%Math.PI)+Math.PI)%Math.PI; return a>Math.PI/2? a-Math.PI : a;};
 
+/* the vertical mirror planes of the part, best first (none found: empty) — and how far off each one is */
+function findSymPlanes(){
+  ensureBVH();
+  const pos=S.baseGeo.attributes.position, n=pos.count;
+  const stride=Math.max(1,Math.floor(n/1400));         // subsample for speed
+  const pts=[];
+  for(let i=0;i<n;i+=stride) pts.push(new THREE.Vector3().fromBufferAttribute(pos,i));
+  const c=geoCentroid();
+  S.baseGeo.computeBoundingBox();
+  const diag=S.baseGeo.boundingBox.getSize(new THREE.Vector3()).length()||1;
+  const tol=0.02*diag;                                 // "symmetric" if RMS < 2% of bbox diag
+  const STEPS=72;
+  const score=θ=>symScore(pts,c,new THREE.Vector3(Math.cos(θ),Math.sin(θ),0));
+  const arr=[];
+  for(let i=0;i<STEPS;i++){const θ=Math.PI*i/STEPS; arr.push({θ,s:score(θ)});}
+  const found=[];
+  for(let i=0;i<STEPS;i++){
+    const a=arr[(i-1+STEPS)%STEPS].s, b=arr[i].s, d=arr[(i+1)%STEPS].s;
+    if(b<tol && b<=a && b<=d){
+      let best=arr[i];
+      for(let r=-1;r<=1.0001;r+=0.1){
+        const θ=arr[i].θ+r*(Math.PI/STEPS), s=score(θ);
+        if(s<best.s)best={θ,s};
+      }
+      found.push(best);
+    }
+  }
+  found.sort((x,y)=>x.s-y.s);
+  const planes=[];
+  for(const f of found){
+    if(planes.some(p=>Math.abs(angleModPi(p._θ-f.θ))<THREE.MathUtils.degToRad(4))) continue;
+    planes.push({p:c.clone(),n:new THREE.Vector3(Math.cos(f.θ),Math.sin(f.θ),0),_θ:f.θ,score:f.s});
+  }
+  S.symPlanes=planes; S.symVisible=true;
+  buildSymLines();
+  const errs=planes.map(p=>(p.score/diag*100).toFixed(1)+'%').join(', ');
+  UI.symOut = planes.length ? `<b>${planes.length}</b> mirror line(s) — error ${errs}.` : 'No vertical mirror symmetry detected.';
+  return {planes, errs};
+}
 function detectSymmetry(){
   if(!S.baseGeo){status('Load a part first.','err');return;}
-  ensureBVH();
   status('Searching for mirror symmetry…');
   UI.symOut='Searching…';
   setTimeout(()=>{                                        // defer so the UI paints
-    const pos=S.baseGeo.attributes.position, n=pos.count;
-    const stride=Math.max(1,Math.floor(n/1400));         // subsample for speed
-    const pts=[];
-    for(let i=0;i<n;i+=stride) pts.push(new THREE.Vector3().fromBufferAttribute(pos,i));
-    const c=geoCentroid();
-    S.baseGeo.computeBoundingBox();
-    const diag=S.baseGeo.boundingBox.getSize(new THREE.Vector3()).length()||1;
-    const tol=0.02*diag;                                 // "symmetric" if RMS < 2% of bbox diag
-    const STEPS=72;
-    const score=θ=>symScore(pts,c,new THREE.Vector3(Math.cos(θ),Math.sin(θ),0));
-    const arr=[];
-    for(let i=0;i<STEPS;i++){const θ=Math.PI*i/STEPS; arr.push({θ,s:score(θ)});}
-    const found=[];
-    for(let i=0;i<STEPS;i++){
-      const a=arr[(i-1+STEPS)%STEPS].s, b=arr[i].s, d=arr[(i+1)%STEPS].s;
-      if(b<tol && b<=a && b<=d){
-        let best=arr[i];
-        for(let r=-1;r<=1.0001;r+=0.1){
-          const θ=arr[i].θ+r*(Math.PI/STEPS), s=score(θ);
-          if(s<best.s)best={θ,s};
-        }
-        found.push(best);
-      }
-    }
-    found.sort((x,y)=>x.s-y.s);
-    const planes=[];
-    for(const f of found){
-      if(planes.some(p=>Math.abs(angleModPi(p._θ-f.θ))<THREE.MathUtils.degToRad(4))) continue;
-      planes.push({p:c.clone(),n:new THREE.Vector3(Math.cos(f.θ),Math.sin(f.θ),0),_θ:f.θ,score:f.s});
-    }
-    S.symPlanes=planes; S.symVisible=true;
-    buildSymLines();
-    if(planes.length){
-      const errs=planes.map(p=>(p.score/diag*100).toFixed(1)+'%').join(', ');
-      status(`Found ${planes.length} mirror line${planes.length>1?'s':''} (RMS error: ${errs}).`,'ok');
-      UI.symOut=`<b>${planes.length}</b> mirror line(s) — error ${errs}.`;
-    }else{
-      status('No vertical mirror symmetry found. Lay the part flat first, or it may be asymmetric.');
-      UI.symOut='No vertical mirror symmetry detected.';
-    }
+    const {planes,errs}=findSymPlanes();
+    if(planes.length) status(`Found ${planes.length} mirror line${planes.length>1?'s':''} (RMS error: ${errs}).`,'ok');
+    else status('No vertical mirror symmetry found. Lay the part flat first, or it may be asymmetric.');
   },20);
 }
 
@@ -1441,17 +1440,6 @@ function buildMirroredGeo(srcGeo){
   return welded;
 }
 
-function getMirroredLSNodes(){
-  const ax=UI.mirrorAxis, off=UI.mirrorOffset;
-  return S.lsNodes.map(n=>{
-    const pos=n.pos.clone(), dir=n.dir.clone();
-    if(ax==='x'){ pos.x=2*off-pos.x; dir.x=-dir.x; }
-    else if(ax==='y'){ pos.y=2*off-pos.y; dir.y=-dir.y; }
-    else { pos.z=2*off-pos.z; dir.z=-dir.z; }
-    return {...n,pos,dir};
-  });
-}
-
 function updateMirroredBase(){
   if(S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
   if(UI&&UI.mirrorEnabled&&S.baseGeo) S.mirroredBaseGeo=buildMirroredGeo(S.baseGeo);
@@ -1791,7 +1779,8 @@ function gatherConfig(opts={}){
     symPlanes:S.symPlanes.map(pl=>({p:[pl.p.x,pl.p.y,pl.p.z],n:[pl.n.x,pl.n.y,pl.n.z]})),
     mirror:{enabled:UI.mirrorEnabled,axis:UI.mirrorAxis,offset:UI.mirrorOffset},
     lsNodes:S.lsNodes.map(n=>({pos:[n.pos.x,n.pos.y,n.pos.z],dir:[n.dir.x,n.dir.y,n.dir.z],
-      intensity:n.intensity,radius:n.radius,mode:n.mode,falloff:n.falloff,code:n.code})),
+      intensity:n.intensity,radius:n.radius,mode:n.mode,falloff:n.falloff,code:n.code,mirror:!!n.mirror})),
+    mirrorPlane:{manual:UI.sculptManual,axis:UI.sculptAxis,offset:UI.sculptOffset},   // set by hand (Sculpt / Morph); the detected lines are symPlanes
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
     colorShades:UI.colorShades, purify:UI.purify,   // a coloured part is re-quantized with these on load
   };
@@ -1877,12 +1866,16 @@ async function applyConfig(cfg){
       if(UI.mirrorEnabled) updateMirroredBase();
     }
     lsClearAll();                               // the previous project's morph points don't belong to this one
+    if(cfg.mirrorPlane){
+      UI.sculptManual=!!cfg.mirrorPlane.manual; UI.sculptAxis=cfg.mirrorPlane.axis||'x'; UI.sculptOffset=+cfg.mirrorPlane.offset||0;
+    }
     if(Array.isArray(cfg.lsNodes) && cfg.lsNodes.length){
       for(const n of cfg.lsNodes){
         // set UI values so lsAddNode picks them up for the arrow/sphere sizing
         if(UI){ UI.lsRadius=n.radius; UI.lsIntensity=n.intensity;
                 UI.lsMode=n.mode; UI.lsFalloff=n.falloff; UI.lsCode=n.code; }
-        const node=lsAddNode(new THREE.Vector3(...n.pos), new THREE.Vector3(...n.dir));
+        const node=lsAddNode(new THREE.Vector3(...n.pos), new THREE.Vector3(...n.dir),
+                             n.mirror ?? !!UI.mirrorEnabled);   // older projects: every point of a half part was mirrored
         if(node){ node.fn=compileLSFn(n.code); }
       }
       lsSelectNode(-1); lsSyncNodeList(); // deselect after loading; user picks up from the list
@@ -2530,9 +2523,7 @@ function compileLSFn(code){
 
 function applyLSDeform(geo, n_it, n_it_nor){
   if(!S.lsNodes.length) return;
-  const nodes = (UI&&UI.mirrorEnabled&&S.lsNodes.length)
-    ? [...S.lsNodes, ...getMirroredLSNodes()]
-    : S.lsNodes;
+  const nodes=lsActingNodes();
   const pos=geo.getAttribute('position');
   const nrm=geo.getAttribute('normal');
   const n=pos.count;
@@ -2573,6 +2564,54 @@ function applyLSDeform(geo, n_it, n_it_nor){
   geo.disposeBoundsTree?.(); geo.boundsTree=null;
 }
 
+/* A point with "Mirror" on acts a second time, reflected across the mirror plane: a half part's own plane,
+   else the part's mirror plane (the one Sculpt uses — the detected symmetry line, or the one set by hand). */
+function lsMirrorPlane(){ return UI.mirrorEnabled ? axisPlane(UI.mirrorAxis, UI.mirrorOffset) : partMirrorPlane(); }
+function lsTwin(node, pl){
+  const pos=node.pos.clone().addScaledVector(pl.n, -2*node.pos.clone().sub(pl.p).dot(pl.n));
+  const dir=node.dir.clone().addScaledVector(pl.n, -2*node.dir.dot(pl.n));
+  return {...node, pos, dir};
+}
+function lsActingNodes(){
+  if(!S.lsNodes.some(n=>n.mirror)) return S.lsNodes;
+  const pl=lsMirrorPlane();
+  return S.lsNodes.flatMap(n=>n.mirror ? [n, lsTwin(n,pl)] : [n]);
+}
+/* "Mirror" was ticked and the part has no mirror plane yet: look for its symmetry line, as "Find mirror lines"
+   does; a part without one is mirrored lengthways through its middle until the plane is set by hand. */
+function lsEnsureMirrorPlane(){
+  if(UI.mirrorEnabled || UI.sculptManual || S.symPlanes[0] || !S.baseGeo) return;
+  if(findSymPlanes().planes.length){ status('Mirrored across the part\'s mirror line (magenta).','ok'); return; }
+  S.baseGeo.computeBoundingBox();
+  const bb=S.baseGeo.boundingBox, sz=bb.getSize(new THREE.Vector3()), c=bb.getCenter(new THREE.Vector3());
+  UI.sculptAxis = sz.x>=sz.y ? 'y' : 'x';
+  UI.sculptOffset = +c[UI.sculptAxis].toFixed(2);
+  UI.sculptManual = true;
+  status('No mirror line found on this part — mirrored through its middle. Change it under “Mirror plane”.','warn');
+}
+/* the twins in the view: a fainter arrow and reach for every mirrored point (rebuilt whenever a point or the plane changes) */
+function lsSyncTwins(){
+  for(const o of [...lsTwinGroup.children]){ lsTwinGroup.remove(o); lsDropViz(o); }
+  const pl=lsMirrorPlane();
+  S.lsNodes.forEach((n,i)=>{
+    if(!n.mirror) return;
+    const t=lsTwin(n,pl), col=i===S.lsActiveNodeIdx?LS_COL_ACTIVE:LS_COL_IDLE;
+    const arrow=lsMakeArrow(t.pos,t.dir,t.radius,col), sphere=lsMakeSphere(t.pos,t.radius,col);
+    for(const m of [arrow.line.material, arrow.cone.material]){ m.transparent=true; m.opacity=0.45; }
+    sphere.material.opacity=0.09;
+    lsTwinGroup.add(arrow,sphere);
+  });
+  if(UI) UI.lsMirrorInfo = UI.mirrorEnabled ? 'Across the half part\'s mirror plane.'
+    : (!UI.sculptManual && S.symPlanes[0]) ? 'Across the part\'s mirror line (magenta in the view).'
+    : `Across ${(UI.sculptAxis||'x').toUpperCase()} = ${+(UI.sculptOffset||0)} mm.`;
+}
+function lsDropViz(o){
+  if(o.line){ o.line.geometry.dispose(); o.line.material.dispose(); o.cone.geometry.dispose(); o.cone.material.dispose(); }
+  else { o.geometry.dispose(); o.material.dispose(); }
+}
+/* the mirror plane moved (other symmetry line, set by hand, half part on / off) */
+function lsPlaneChanged(){ if(S.lsNodes.some(n=>n.mirror)){ lsSyncTwins(); lsPreviewUpdate(); } }
+
 function lsMakeArrow(pos, dir, radius, color){
   const len=radius*1.4;
   const ah=new THREE.ArrowHelper(dir.clone().normalize(), pos.clone(), len, color, len*0.28, len*0.14);
@@ -2587,7 +2626,7 @@ function lsMakeSphere(pos, radius, color){
   return mesh;
 }
 
-function lsAddNode(pos, initialDir){
+function lsAddNode(pos, initialDir, mirror){
   if(!UI||!S.baseGeo) return null;
   S.baseGeo.computeBoundingBox();
   const bb=S.baseGeo.boundingBox, sz=bb.getSize(new THREE.Vector3());
@@ -2611,6 +2650,7 @@ function lsAddNode(pos, initialDir){
   lsGroup.add(arrowHelper,sphereViz);
 
   const node={pos:pos.clone(),dir,intensity,radius,mode,falloff,code,fn:compileLSFn(code),
+              mirror: mirror ?? !!(UI.mirrorEnabled || UI.lsMirror),   // a half part starts mirrored, otherwise like the last point
               arrowHelper,sphereViz,pivot};
   S.lsNodes.push(node);
   lsSelectNode(S.lsNodes.length-1);
@@ -2628,6 +2668,7 @@ function lsSelectNode(idx){
     nd.arrowHelper.setColor(col);
     nd.sphereViz.material.color.setHex(col);
   }
+  lsSyncTwins();
   if(idx<0||idx>=S.lsNodes.length){
     lsXform.detach(); lsXform.visible=false; lsXform.enabled=false; return;
   }
@@ -2636,7 +2677,7 @@ function lsSelectNode(idx){
   lsXform.attach(node.pivot); lsXform.visible=true; lsXform.enabled=true;
   if(UI){
     UI.lsIntensity=node.intensity; UI.lsRadius=node.radius;
-    UI.lsMode=node.mode; UI.lsFalloff=node.falloff; UI.lsCode=node.code;
+    UI.lsMode=node.mode; UI.lsFalloff=node.falloff; UI.lsCode=node.code; UI.lsMirror=node.mirror;
   }
 }
 
@@ -2656,7 +2697,7 @@ function lsSyncNodeList(){
   if(!UI) return;
   UI.lsNodes=S.lsNodes.map((n,i)=>({
     idx:i,
-    label:`Point ${i+1} · ${n.mode} ${n.intensity} mm · reach ${n.radius} mm`,
+    label:`Point ${i+1} · ${n.mode} ${n.intensity} mm · reach ${n.radius} mm${n.mirror?' · mirrored':''}`,
   }));
 }
 
@@ -2668,6 +2709,7 @@ function lsUpdateActiveNode(){
   node.radius=UI.lsRadius;
   node.mode=UI.lsMode;
   node.falloff=UI.lsFalloff;
+  node.mirror=!!UI.lsMirror;
 
   // rebuild arrow + sphere with new radius/color
   const col=LS_COL_ACTIVE;
@@ -2677,7 +2719,7 @@ function lsUpdateActiveNode(){
   node.arrowHelper=lsMakeArrow(node.pos,node.dir,node.radius,col); lsGroup.add(node.arrowHelper);
   node.sphereViz=lsMakeSphere(node.pos,node.radius,col);           lsGroup.add(node.sphereViz);
 
-  lsSyncNodeList(); lsPreviewUpdate();
+  lsSyncTwins(); lsSyncNodeList(); lsPreviewUpdate();
 }
 
 function lsApplyCode(){
@@ -2707,7 +2749,7 @@ function lsOnGizmoChange(){
   const dir=new THREE.Vector3(0,0,1).applyQuaternion(node.pivot.quaternion).normalize();
   node.dir=dir;
   node.arrowHelper.setDirection(dir);
-  lsPreviewUpdate();
+  lsSyncTwins(); lsPreviewUpdate();
 }
 
 function lsPreviewUpdate(){
@@ -2729,7 +2771,7 @@ function lsRevertPreview(){
 function lsEnter(){
   lsGroup.visible=true;
   lsXform.visible=S.lsActiveNodeIdx>=0; lsXform.enabled=S.lsActiveNodeIdx>=0;
-  lsPreviewUpdate();
+  lsSyncTwins(); lsPreviewUpdate();
   status(S.lsNodes.length ? 'Morph: select a point to change it, or add another one.'
                           : 'Morph: press “Add a point”, then click the part where it should change.');
 }
@@ -2750,7 +2792,7 @@ function lsClearAll(){
   S.lsNodes=[]; S.lsActiveNodeIdx=-1;
   lsXform.detach(); lsXform.visible=false; lsXform.enabled=false;
   if(UI){ UI.lsActiveNode=-1; UI.lsNodes=[]; }
-  lsRevertPreview();
+  lsSyncTwins(); lsRevertPreview();
 }
 
 /* ======================================================================== *
@@ -3399,7 +3441,7 @@ function chainApp(){
     /* ----- loop sculpt (optional step) ----- */
     lsNodes:[], lsActiveNode:-1,
     lsIntensity:5, lsRadius:20,
-    lsMode:'push', lsFalloff:'smooth',
+    lsMode:'push', lsFalloff:'smooth', lsMirror:false, lsMirrorInfo:'',
     lsCode:'return n_it_nor;',
     lsPreviewT:0.5,
     lsGizmoMode:'rotate',
@@ -3478,9 +3520,9 @@ function chainApp(){
       this.$watch('sculptRadius',   v=>sculpt.brush.radius=v);
       this.$watch('sculptStrength', v=>sculpt.brush.strength=v);
       this.$watch('sculptMirror',   ()=>applySculptMirror());
-      this.$watch('sculptManual',   ()=>applySculptMirror());
-      this.$watch('sculptAxis',     ()=>applySculptMirror());
-      this.$watch('sculptOffset',   ()=>applySculptMirror());
+      this.$watch('sculptManual',   ()=>{ applySculptMirror(); lsPlaneChanged(); });
+      this.$watch('sculptAxis',     ()=>{ applySculptMirror(); lsPlaneChanged(); });
+      this.$watch('sculptOffset',   ()=>{ applySculptMirror(); lsPlaneChanged(); });
 
       // heightmap displacement bridges
       this.$watch('hmRadius',   v=>disp.brush.radius=v);
@@ -3497,15 +3539,16 @@ function chainApp(){
         this.$watch(k, hmReproc);
 
       // mirror half
-      this.$watch('mirrorEnabled', ()=>{ updateMirroredBase(); if(S.poses.length) regen(); });
-      this.$watch('mirrorAxis',    ()=>{ if(UI.mirrorEnabled){ updateMirroredBase(); if(S.poses.length) regen(); } });
-      this.$watch('mirrorOffset',  ()=>{ if(UI.mirrorEnabled) debounceMirrorRegen(); });
+      this.$watch('mirrorEnabled', ()=>{ updateMirroredBase(); lsPlaneChanged(); if(S.poses.length) regen(); });
+      this.$watch('mirrorAxis',    ()=>{ if(UI.mirrorEnabled){ updateMirroredBase(); lsPlaneChanged(); if(S.poses.length) regen(); } });
+      this.$watch('mirrorOffset',  ()=>{ if(UI.mirrorEnabled){ lsPlaneChanged(); debounceMirrorRegen(); } });
 
       // loop sculpt bridges
       this.$watch('lsIntensity', ()=>lsUpdateActiveNode());
       this.$watch('lsRadius',    ()=>lsUpdateActiveNode());
       this.$watch('lsMode',      ()=>lsUpdateActiveNode());
       this.$watch('lsFalloff',   ()=>lsUpdateActiveNode());
+      this.$watch('lsMirror',    v=>{ if(v && S.lsActiveNodeIdx>=0) lsEnsureMirrorPlane(); lsUpdateActiveNode(); });
       this.$watch('lsPreviewT',  ()=>lsPreviewUpdate());
 
       // decorate bridges

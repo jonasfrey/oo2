@@ -11,6 +11,8 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
    everything else (fine rotation, flatten bottom, symmetry / half part, colours, file units) is folded away.
    the part is never reduced: it keeps every vertex of the file you loaded.
    the optional extras live here too: Sculpt, Relief from an image, Morph along the chain, Add an object.
+   a morph point can be **mirrored** ("Mirror to the other side"): it then acts a second time across the part's mirror plane —
+   the detected symmetry line (found on the first tick), or a plane set by hand; on a half part its own mirror plane.
 2. **Joints** — the next link starts exactly on top of the part; move it along X / Y (arrows in the view, or the sliders)
    until the fit check says the two no longer touch. height step and pivot point are folded away.
 3. **Chain** — shape + number of links, with a status card (length, overlaps, plate fit).
