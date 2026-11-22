@@ -148,6 +148,21 @@ mateXform.addEventListener('dragging-changed', e=>{
 });
 mateXform.addEventListener('objectChange', mateGizmoMoved);
 
+/* ---- flatten the bottom: an arrow on the cut plane — dragging it up or down sets the cut height ---- */
+const cutXform = new TransformControls(camera, renderer.domElement);
+cutXform.visible=false; cutXform.enabled=false;
+cutXform.showX=false; cutXform.showY=false;   // the plane only moves up and down
+scene.add(cutXform);
+const cutHandle = new THREE.Object3D();       // what the arrow holds: the middle of the cut plane
+scene.add(cutHandle);
+cutXform.addEventListener('dragging-changed', e=>{
+  controls.enabled = !e.value;
+  if(!e.value) updateCutPreview();            // drag finished → the arrow settles on the (0.1 mm-stepped) plane
+});
+cutXform.addEventListener('objectChange', ()=>{
+  UI.cutHeight = +Math.min(UI.cutMax, Math.max(UI.cutMin, cutHandle.position.z)).toFixed(1);
+});
+
 /* ---- decorate step: combined move/rotate/scale gizmo for the placed object ---- */
 const decoGizmo = new TransformGizmo({ scene, camera, renderer, controls });
 
@@ -243,7 +258,7 @@ const S = {
   partEdges:null,        // LineSegments outline of the single part (x-ray)
   matePreview:null,      // ghost of the neighbouring link shown in step 2
   geoPreCut:null,        // pre-flatten copy of baseGeo, for "undo cut"
-  cutPlaneViz:null,      // translucent plane previewing the flatten-bottom cut height
+  cutViz:null,           // the flatten-bottom preview: sheet at the cut height, what is cut off in red, the cut line
   overrides:new Map(),   // link index → {geo,name}: that slot uses a custom model
   overrideGroup:null,    // THREE.Group of the custom-link meshes
   selectedLink:null,     // index of the link picked in the viewport (for swapping)
@@ -417,7 +432,7 @@ function updateMeshChips(){
   const s=b.getSize(new THREE.Vector3());
   UI.chipMesh=`<b>${S.baseGeo.attributes.position.count.toLocaleString()}</b> verts · ${Math.round(triCount(S.baseGeo)).toLocaleString()} tris`;
   UI.chipSize=`bbox <b>${s.x.toFixed(1)}×${s.y.toFixed(1)}×${s.z.toFixed(1)}</b> mm`;
-  UI.cutMax=Math.max(1,+b.max.z.toFixed(1));     // the flatten-bottom slider spans the part's height
+  UI.cutMin=+b.min.z.toFixed(1); UI.cutMax=Math.max(UI.cutMin+0.1,+b.max.z.toFixed(1));     // the flatten-bottom slider spans the part's height
 }
 
 /* ------------------------------- CAMERA --------------------------------- *
@@ -763,28 +778,88 @@ function layFlat(){
 }
 
 /* ----- FLATTEN BOTTOM: slice off everything below a Z height, cap the new floor ----- */
+const CUT_COL = { off:0xff4d4d, line:0xfff2a8 };
 function clearCutPreview(){
-  if(S.cutPlaneViz){ scene.remove(S.cutPlaneViz); S.cutPlaneViz.geometry.dispose(); S.cutPlaneViz.material.dispose(); S.cutPlaneViz=null; }
+  if(S.cutViz){ scene.remove(S.cutViz); S.cutViz.traverse(o=>{ if(o!==S.cutViz.userData.off) o.geometry?.dispose(); o.material?.dispose(); }); S.cutViz=null; }
+  cutXform.detach(); cutXform.visible=false; cutXform.enabled=false;
   if(UI) UI.cutPreview=false;
 }
+/* where the plane z = h cuts the part: one line segment per crossed triangle, as [x,y, x,y, …] */
+function cutSegments(h){
+  ensureBVH();
+  const out=[], P=[null,null,null];
+  S.baseGeo.boundsTree.shapecast({
+    intersectsBounds: box=>box.min.z<=h && box.max.z>=h,
+    intersectsTriangle: tri=>{
+      P[0]=tri.a; P[1]=tri.b; P[2]=tri.c;
+      for(let i=0;i<3;i++){
+        const a=P[i], b=P[(i+1)%3];
+        if((a.z<h)===(b.z<h)) continue;                 // this edge does not cross the plane
+        const t=(h-a.z)/(b.z-a.z);
+        out.push(a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t);
+      }
+    }
+  });
+  return out;
+}
+/* The cut, before it is made: a sheet at the cut height, everything below it — what gets cut off — in red, and the
+   line where the sheet goes through the part (the edge of the new bottom) as a bright band. */
 function updateCutPreview(){
   if(!UI.cutPreview || !S.baseGeo) return;
   S.baseGeo.computeBoundingBox();
-  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3());
-  if(!S.cutPlaneViz){
-    const g=new THREE.PlaneGeometry(1,1);
-    const m=new THREE.MeshBasicMaterial({color:0xff5d5d,transparent:true,opacity:.3,side:THREE.DoubleSide,depthWrite:false});
-    S.cutPlaneViz=new THREE.Mesh(g,m); S.cutPlaneViz.renderOrder=998; scene.add(S.cutPlaneViz);
+  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3()), h=UI.cutHeight;
+  if(!S.cutViz){
+    const g=S.cutViz=new THREE.Group();
+    const sheet=new THREE.Mesh(new THREE.PlaneGeometry(1,1),
+      new THREE.MeshBasicMaterial({color:CUT_COL.off,transparent:true,opacity:.16,side:THREE.DoubleSide,depthWrite:false}));
+    sheet.renderOrder=996;
+    const off=new THREE.Mesh(S.baseGeo, new THREE.MeshBasicMaterial({color:CUT_COL.off,transparent:true,opacity:.62,side:THREE.DoubleSide,
+      depthWrite:false,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1,     // lies on the part's own surface
+      clippingPlanes:[new THREE.Plane(new THREE.Vector3(0,0,-1),0)]}));                     // only what is below the sheet
+    off.renderOrder=997;
+    const band=new THREE.Mesh(new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({color:CUT_COL.line,side:THREE.DoubleSide,depthTest:false,transparent:true}));
+    band.renderOrder=999;
+    const line=new THREE.LineSegments(new THREE.BufferGeometry(),          // the same line once more: still there when the sheet is seen edge-on
+      new THREE.LineBasicMaterial({color:CUT_COL.line,depthTest:false,transparent:true}));
+    line.renderOrder=999;
+    g.add(sheet,off,band,line); g.userData={sheet,off,band,line};
+    scene.add(g);
+    cutXform.attach(cutHandle); cutXform.visible=true; cutXform.enabled=true;
   }
-  S.cutPlaneViz.scale.set(s.x*1.4+10, s.y*1.4+10, 1);
-  S.cutPlaneViz.position.set((b.min.x+b.max.x)/2,(b.min.y+b.max.y)/2,UI.cutHeight);
+  const {sheet,off,band,line}=S.cutViz.userData;
+  const cx=(b.min.x+b.max.x)/2, cy=(b.min.y+b.max.y)/2;
+  sheet.scale.set(s.x*1.4+10, s.y*1.4+10, 1);
+  sheet.position.set(cx,cy,h);
+  off.material.clippingPlanes[0].constant=h;
+  if(!cutXform.dragging) cutHandle.position.set(cx,cy,h);
+  const seg=cutSegments(h), w=Math.max(0.12, s.length()*0.006)/2;     // half the band's width, in mm
+  const lp=[], bp=[];
+  for(let i=0;i+3<seg.length;i+=4){
+    const x1=seg[i], y1=seg[i+1], x2=seg[i+2], y2=seg[i+3];
+    let nx=y2-y1, ny=x1-x2; const l=Math.hypot(nx,ny); if(l<1e-9) continue;
+    nx*=w/l; ny*=w/l;
+    lp.push(x1,y1,h, x2,y2,h);
+    bp.push(x1+nx,y1+ny,h, x2+nx,y2+ny,h, x2-nx,y2-ny,h,  x1+nx,y1+ny,h, x2-nx,y2-ny,h, x1-nx,y1-ny,h);
+  }
+  band.geometry.setAttribute('position', new THREE.Float32BufferAttribute(bp,3));
+  line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(lp,3));
+}
+/* "Flatten the bottom" was opened (or the Part page reopened with it open): the plane starts through the middle of the part */
+function startCutPreview(center){
+  if(!S.baseGeo || S.uiStep!=='s1') return;
+  S.baseGeo.computeBoundingBox();
+  const b=S.baseGeo.boundingBox;
+  if(center || !(UI.cutHeight>b.min.z && UI.cutHeight<b.max.z)) UI.cutHeight=+((b.min.z+b.max.z)/2).toFixed(1);
+  UI.cutPreview=true; updateCutPreview();
+  status('Drag the blue arrow up or down: everything shown in red is cut off.');
 }
 function cutFlatBottom(){
   if(!S.baseGeo) return;
   const cutZ=UI.cutHeight;
-  if(!(cutZ>0)){ status('Set a cut height above 0 first.','warn'); return; }
   S.baseGeo.computeBoundingBox();
   const b=S.baseGeo.boundingBox;
+  if(!(cutZ>b.min.z)){ status('The cut height is at the very bottom — nothing would be cut off.','warn'); return; }
   if(cutZ>=b.max.z){ status('Cut height is at or above the part — nothing would be left.','err'); return; }
   if(!S.geoPreCut) S.geoPreCut=S.baseGeo.clone();
   const size=b.getSize(new THREE.Vector3()), c=b.getCenter(new THREE.Vector3());
@@ -801,7 +876,7 @@ function cutFlatBottom(){
   swapBaseGeometry(g);
   S.meshDirty=true; clearCutPreview(); UI.cutHeight=0; UI.hasCutUndo=true;
   regen(); frameCamera();
-  status(`Cut flat — removed ${cutZ.toFixed(1)} mm from the bottom.`,'ok');
+  status(`Cut flat — removed ${(cutZ-b.min.z).toFixed(1)} mm from the bottom.`,'ok');
 }
 function undoCutFlat(){
   if(!S.geoPreCut) return;
@@ -3234,6 +3309,7 @@ function showStepView(id){
   if(wasLS     && id!=='lsculpt') lsExit();
   if(wasDeco   && id!=='deco') decoExit();      // leaving with a placed object fuses it into the link
   if(id!=='s1') clearCutPreview();              // the flatten-bottom plane belongs to the Part page only
+  else if(UI && UI.cutFold && !UI.cutPreview) startCutPreview(false);   // … and is back when the page is, if its section is open
   if(id==='sculpt'  && !sculpt.active && S.baseGeo) enterSculpt();
   if(id==='height'  && !disp.active  && S.baseGeo) enterHeight();
   if(id==='lsculpt' && S.baseGeo) lsEnter();
@@ -3428,7 +3504,7 @@ function chainApp(){
     symOut:'',
     dbgOut:'Load a part to see its vertex / triangle count.',
     showVerts:false, showWire:false,
-    cutHeight:0, cutMax:20, cutPreview:false, hasCutUndo:false,
+    cutHeight:0, cutMin:0, cutMax:20, cutPreview:false, cutFold:false, hasCutUndo:false,
     s1nextDisabled:true,
     /* ----- sculpt (optional step) ----- */
     sculptTool:'draw', sculptRadius:8, sculptStrength:0.5,
@@ -3513,7 +3589,7 @@ function chainApp(){
       this.$watch('exportMaxVerts', ()=>updateExportEstimate());
       this.$watch('sectionZ', ()=>updateSectionPlane());
       this.$watch('cutHeight', v=>{              // moving the slider shows the cut plane — no separate "preview" toggle
-        if(v>0 && S.baseGeo && S.uiStep==='s1') this.cutPreview=true; else if(!(v>0)) clearCutPreview();
+        if(v>this.cutMin && S.baseGeo && S.uiStep==='s1') this.cutPreview=true; else if(!(v>this.cutMin)) clearCutPreview();
         updateCutPreview();
       });
       this.$watch('sculptTool',     v=>sculpt.brush.type=v);
@@ -3655,6 +3731,8 @@ function chainApp(){
     toggleVerts(){ this.showVerts=!this.showVerts; updateDebugViz(); },
     toggleWire(){ this.showWire=!this.showWire; updateDebugViz(); },
     cutFlatBottom, undoCutFlat,
+    onCutFold(open){ this.cutFold=open; if(open) startCutPreview(true); else clearCutPreview(); },
+    get cutInfo(){ const off=this.cutHeight-this.cutMin, all=this.cutMax-this.cutMin; return `Cuts off the lowest ${off.toFixed(1)} mm of ${all.toFixed(1)} mm — ${Math.round(100*off/all)} % of the height.`; },
 
     /* ---- loop sculpt actions ---- */
     mirrorSnap(){

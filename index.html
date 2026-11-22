@@ -110,13 +110,14 @@
             </div>
           </details>
 
-          <details class="fold">
+          <details class="fold" @toggle="onCutFold($event.target.open)">
             <summary>Flatten the bottom</summary>
             <div class="foldbody">
-              <p class="hint">Rounded feet or a stray bump underneath? Slice everything below this height off, so the part really sits flat. The red plane shows the cut.</p>
-              <div class="srow"><label>Cut height (mm)</label><input x-model.number="cutHeight" type="range" min="0" :max="cutMax" step="0.1"><input x-model.number="cutHeight" type="number" step="0.1" min="0"></div>
+              <p class="hint">Rounded feet or a stray bump underneath? Slice the part off at a height, so it really sits flat. <b>Drag the blue arrow</b> in the view, or use the slider: everything shown in <span style="color:#ff6b6b">red</span> is cut away, the bright line is the edge of the new bottom.</p>
+              <div class="srow"><label>Cut height (mm)</label><input x-model.number="cutHeight" type="range" :min="cutMin" :max="cutMax" step="0.1"><input x-model.number="cutHeight" type="number" step="0.1" :min="cutMin" :max="cutMax"></div>
+              <p class="hint" x-show="cutPreview" x-text="cutInfo"></p>
               <div class="btnrow">
-                <button class="sm" @click="cutFlatBottom()" :disabled="!(cutHeight>0)">Cut flat</button>
+                <button class="sm" @click="cutFlatBottom()" :disabled="!cutPreview || !(cutHeight>cutMin && cutHeight<cutMax)">Cut flat</button>
                 <button class="ghost sm" @click="undoCutFlat()" :disabled="!hasCutUndo">Undo cut</button>
               </div>
             </div>
