@@ -11,13 +11,16 @@ import * as THREE from 'three';
  *   centre ball          drag → move freely in the view plane
  *   outer white ring     drag → scale uniformly
  *
- * Hold Shift while dragging to snap (1 mm · 15° · 0.05×). `space` = 'local'
- * aligns the handles with the object's own rotation; 'world' keeps them on the
- * plate axes (per-axis scale cubes are hidden there — a world-axis stretch of a
- * rotated object would be a shear, which a position/rotation/scale can't hold).
+ * Hold Shift while dragging to snap (1 mm · 15° · 0.05×), Ctrl for fine
+ * adjustment: the drag then counts a tenth (`fine` tells the callbacks). `space`
+ * = 'local' aligns the handles with the object's own rotation; 'world' keeps
+ * them on the plate axes (per-axis scale cubes are hidden there — a world-axis
+ * stretch of a rotated object would be a shear, which a position/rotation/scale
+ * can't hold).
  *
  * `handles` picks the kinds to build ('move', 'rotate', 'scale', 'free', 'uniform'; default: all) — a thing that can
- * only be moved and turned gets a gizmo without the scale handles.
+ * only be moved and turned gets a gizmo without the scale handles. `axes` narrows a kind down to some of its axes
+ * ({ move: ['z'], rotate: ['x', 'y'] }: a plane that is pushed along its normal and tilted); setAxes() changes that later.
  *
  * Interaction contract matches the sculpt/heightmap controllers: a capture-phase
  * pointerdown on the canvas disables OrbitControls before it sees the event, so
@@ -51,8 +54,9 @@ function ringToAxis(geo, axis) {
 }
 
 export class TransformGizmo {
-  constructor({ scene, camera, renderer, controls, handles = null }) {
+  constructor({ scene, camera, renderer, controls, handles = null, axes = null }) {
     this.kinds = handles ? new Set(handles) : null;   // null: every kind
+    this.axes = axes || {};         // kind → the axes it has handles for (a kind left out: all three)
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -65,6 +69,8 @@ export class TransformGizmo {
     this.snapAngle = Math.PI / 12;  // 15°
     this.snapScale = 0.05;
     this.snap = false;              // always snap (Shift snaps too)
+    this.fineFactor = 0.1;          // how much of a drag counts while Ctrl is held
+    this.fine = false;              // the current drag is a fine one (for callbacks that round what they read)
     this.minScale = 0.01;
 
     this.onDragStart = null;        // (kind, axis) => void
@@ -83,6 +89,7 @@ export class TransformGizmo {
     this._billboard = new THREE.Group();   // holds the uniform-scale ring, turned to face the camera
     this.root.add(this._billboard);
     this._build();
+    this._showHandles();
     scene.add(this.root);
 
     this._onDown = this._onDown.bind(this);
@@ -118,6 +125,16 @@ export class TransformGizmo {
 
   setSpace(space) { this.space = space; this.update(); }
 
+  /** Which axes a kind shows handles for, e.g. setAxes('move', ['x', 'y']). */
+  setAxes(kind, list) { this.axes[kind] = list; this._showHandles(); }
+
+  _showHandles() {
+    for (const h of this.handles) {
+      const only = h.axis && this.axes[h.kind];
+      h.group.visible = !(only && !only.includes(h.axis)) && !(h.kind === 'scale' && this.space !== 'local');
+    }
+  }
+
   /** Follow the object and keep a constant on-screen size. */
   update() {
     if (!this.object || !this.root.visible) return;
@@ -129,7 +146,7 @@ export class TransformGizmo {
     const k = d * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * this.size;
     this.root.scale.setScalar(Math.max(k, 1e-6));
     this._billboard.quaternion.copy(this.root.quaternion).invert().multiply(this.camera.quaternion);
-    for (const h of this.handles) if (h.kind === 'scale') h.group.visible = this.space === 'local';
+    this._showHandles();
     this.root.updateMatrixWorld(true);
   }
 
@@ -208,9 +225,10 @@ export class TransformGizmo {
 
   // ---- pointer handlers ----------------------------------------------------
   _onDown(ev) {
-    if (!this.active || ev.button !== 0 || ev.altKey) return;
+    if (!this.active || ev.button !== 0 || ev.altKey || ev.viewGrabbed) return;
     const pick = this._pick(ev);
     if (!pick) return;
+    ev.viewGrabbed = true;                       // one handle per click, whoever else has handles under the pointer
     this.controls.enabled = false;               // beat OrbitControls' own pointerdown
     this.renderer.domElement.setPointerCapture?.(ev.pointerId);
     ev.stopPropagation(); ev.preventDefault();
@@ -228,6 +246,8 @@ export class TransformGizmo {
       mouse0: new THREE.Vector2(ev.clientX - rect.left, ev.clientY - rect.top),
       center: this._screen(origin, rect),
       plane: new THREE.Plane(), p0: null, angle: 0, prevVec: null,
+      raw: handle.kind === 'uniform' || handle.kind === 'scale' ? 1 : 0, acc: 0,   // see _count
+      rawV: new THREE.Vector3(), accV: new THREE.Vector3(),
     };
     if (handle.kind === 'move' || handle.kind === 'scale') {
       // plane through the axis that faces the camera as much as possible
@@ -256,29 +276,38 @@ export class TransformGizmo {
 
   _cancel() { this.drag = null; this.controls.enabled = true; }
 
+  /* How far the drag has come: what the pointer says (`raw`, measured from where the drag began), taken step by
+     step — so that the steps made while Ctrl is held can count for less without the handle jumping. */
+  _count(d, raw) {
+    d.acc += (raw - d.raw) * (this.fine ? this.fineFactor : 1);
+    d.raw = raw;
+    return d.acc;
+  }
+
   _onMove(ev) {
     if (!this.active) return;
     if (!this.drag) { if (this.object && this.root.visible) this._setHover(this._pick(ev)?.handle || null); return; }
     const d = this.drag, o = this.object, snap = this.snap || ev.shiftKey;
+    this.fine = ev.ctrlKey || ev.metaKey;
     const rect = this._setRay(ev);
     const mouse = new THREE.Vector2(ev.clientX - rect.left, ev.clientY - rect.top);
     const kind = d.handle.kind;
 
     if (kind === 'uniform') {
       const d0 = Math.max(5, d.mouse0.distanceTo(d.center));
-      let f = mouse.distanceTo(d.center) / d0;
+      let f = 1 + this._count(d, mouse.distanceTo(d.center) / d0);
       if (snap) f = Math.round(f / this.snapScale) * this.snapScale;
       o.scale.copy(d.startScale).multiplyScalar(Math.max(this.minScale / Math.min(d.startScale.x, d.startScale.y, d.startScale.z), f));
     } else if (kind === 'rotate') {
       let angle;
       if (d.useTangent) {
-        angle = mouse.clone().sub(d.mouse0).dot(d.tan2) / d.radPx;
+        angle = this._count(d, mouse.clone().sub(d.mouse0).dot(d.tan2) / d.radPx);
       } else {
         if (!this._ray.ray.intersectPlane(d.plane, _hit)) return;
         const v = _hit.clone().sub(d.origin);
         // accumulate the step since the last move so the angle can wind past ±180°
         const cross = d.prevVec.clone().cross(v).dot(d.axisW), dot = d.prevVec.dot(v);
-        d.angle += Math.atan2(cross, dot);
+        d.angle += Math.atan2(cross, dot) * (this.fine ? this.fineFactor : 1);
         d.prevVec = v;
         angle = d.angle;
       }
@@ -287,17 +316,19 @@ export class TransformGizmo {
     } else {
       if (!this._ray.ray.intersectPlane(d.plane, _hit)) return;
       if (kind === 'free') {
-        const delta = _hit.clone().sub(d.p0);
+        const raw = _hit.clone().sub(d.p0);
+        const delta = d.accV.addScaledVector(_v.copy(raw).sub(d.rawV), this.fine ? this.fineFactor : 1).clone();
+        d.rawV.copy(raw);
         if (snap) delta.set(Math.round(delta.x / this.snapMove) * this.snapMove, Math.round(delta.y / this.snapMove) * this.snapMove, Math.round(delta.z / this.snapMove) * this.snapMove);
         this._setWorldPos(d.origin.clone().add(delta));
       } else {
         const t0 = d.p0.clone().sub(d.origin).dot(d.axisW), t = _hit.clone().sub(d.origin).dot(d.axisW);
         if (kind === 'move') {
-          let delta = t - t0;
+          let delta = this._count(d, t - t0);
           if (snap) delta = Math.round(delta / this.snapMove) * this.snapMove;
           this._setWorldPos(d.origin.clone().addScaledVector(d.axisW, delta));
         } else {   // per-axis scale
-          let f = Math.abs(t0) > 1e-9 ? t / t0 : 1;
+          let f = Math.abs(t0) > 1e-9 ? 1 + this._count(d, t / t0) : 1;
           if (snap) f = Math.round(f / this.snapScale) * this.snapScale;
           o.scale.copy(d.startScale);
           o.scale[d.handle.axis] = Math.max(this.minScale, d.startScale[d.handle.axis] * f);
@@ -319,6 +350,7 @@ export class TransformGizmo {
 
   _end() {
     this.drag = null;
+    this.fine = false;
     this.controls.enabled = true;
     this.onDragEnd?.();
   }

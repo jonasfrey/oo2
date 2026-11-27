@@ -22,6 +22,7 @@ import { DisplacementController } from './heightmap/DisplacementController.js';
 import { HeightmapEditor }        from './heightmap/HeightmapEditor.js';
 import { EditHistory }            from './EditHistory.js';
 import { ViewCube }               from './ViewCube.js';
+import { PullDots }               from './PullDots.js';
 import { importDecoration, simplifyColored, weldWithColors } from './deco/DecoImport.js';
 import { fuseGeometries, solidWithColor } from './deco/Fuse.js';
 import { TransformGizmo }         from './deco/TransformGizmo.js';
@@ -34,7 +35,7 @@ THREE.Mesh.prototype.raycast                       = acceleratedRaycast;
 
 /* Register the Alpine component up-front (chainApp is a hoisted function decl), so the
    UI mounts even if the engine setup below throws for some reason. */
-document.addEventListener('alpine:init', ()=>{ window.Alpine.data('chainApp', chainApp); });
+document.addEventListener('alpine:init', ()=>{ window.Alpine.data('chainApp', chainApp); window.Alpine.directive('jog', jogDirective); });
 
 /* ============================ TUNABLE CONSTANTS ============================
    Everything a maker is likely to tweak lives here.                          */
@@ -104,6 +105,7 @@ controls.maxDistance = 50000;
 controls.enableZoom = false;
 const ZOOM_SENSITIVITY = 0.5;          // lower = gentler zoom per wheel notch
 renderer.domElement.addEventListener('wheel', e=>{
+  if(e.shiftKey && brushResize((e.deltaY||e.deltaX)<0 ? 1 : -1)){ e.preventDefault(); return; }   // (with Shift some browsers report the wheel sideways)
   if(!controls.enabled) return;
   e.preventDefault();
   const norm = Math.min(Math.abs(e.deltaY), 120) / 100;   // tame oversized wheel deltas
@@ -135,33 +137,36 @@ window.__debug={xform,controls};   // TEMP: removed before commit
 const lsGroup = new THREE.Group(); lsGroup.visible = false; scene.add(lsGroup);
 const lsTwinGroup = new THREE.Group(); lsGroup.add(lsTwinGroup);   // the mirrored twins of morph points (see lsSyncTwins)
 
-/* ---- joints step: X / Y arrows on the previewed next link — dragging them sets the link offset ---- */
-const mateXform = new TransformControls(camera, renderer.domElement);
-mateXform.visible=false; mateXform.enabled=false;
-mateXform.showZ=false;                        // the arrows only slide the link over the plate; height is a number field
-scene.add(mateXform);
+/* ---- HANDLES IN THE VIEW ----
+   Whatever is a place or a length on the part is set where it is: by dragging a handle in the view. All of them are
+   the same two kinds of thing — the gizmo's arrows and rings (deco/TransformGizmo.js) and round dots for a length
+   (PullDots.js) — and they all take the same two keys: Shift snaps to whole steps, Ctrl is for fine adjustment (the
+   drag counts a tenth). The side panel shows the same values as numbers; nothing there has a fixed range of mm. */
+const pullDots = new PullDots({ scene, camera, renderer, controls });
+
+/* ---- joints step: arrows on the previewed next link — dragging them sets the link offset ---- */
+const mateGizmo = new TransformGizmo({ scene, camera, renderer, controls, handles:['move'], axes:{move:['x','y']} });
+mateGizmo.space='world'; mateGizmo.size=0.22; // (the Z arrow — the height step — shows while that section is open)
 const mateHandle = new THREE.Object3D();      // what the arrows hold: the middle of the next link
 scene.add(mateHandle);
-mateXform.addEventListener('dragging-changed', e=>{
-  controls.enabled = !e.value;
-  if(!e.value) syncMateGizmo();               // drag finished → the arrows settle on the (0.1 mm-stepped) link
-});
-mateXform.addEventListener('objectChange', mateGizmoMoved);
+mateGizmo.onChange=()=>mateGizmoMoved();
+mateGizmo.onDragEnd=()=>syncMateGizmo();      // drag finished → the arrows settle on the (stepped) link
 
-/* ---- flatten the bottom: an arrow on the cut plane — dragging it up or down sets the cut height ---- */
-const cutXform = new TransformControls(camera, renderer.domElement);
-cutXform.visible=false; cutXform.enabled=false;
-cutXform.showX=false; cutXform.showY=false;   // the plane only moves up and down
-scene.add(cutXform);
-const cutHandle = new THREE.Object3D();       // what the arrow holds: the middle of the cut plane
+/* ---- flatten the bottom: an arrow and two rings on the cut plane — push it through the part, tilt it ---- */
+const cutGizmo = new TransformGizmo({ scene, camera, renderer, controls, handles:['move','rotate'], axes:{move:['z'],rotate:['x','y']} });
+cutGizmo.size=0.3; cutGizmo.snapAngle=Math.PI/36;     // Shift: 1 mm · 5°
+const cutHandle = new THREE.Object3D();       // what they hold: the middle of the cut plane, its Z along the plane's normal
 scene.add(cutHandle);
-cutXform.addEventListener('dragging-changed', e=>{
-  controls.enabled = !e.value;
-  if(!e.value) updateCutPreview();            // drag finished → the arrow settles on the (0.1 mm-stepped) plane
-});
-cutXform.addEventListener('objectChange', ()=>{
-  UI.cutHeight = +Math.min(UI.cutMax, Math.max(UI.cutMin, cutHandle.position.z)).toFixed(1);
-});
+cutGizmo.onChange=()=>cutGizmoMoved();
+cutGizmo.onDragEnd=()=>updateCutPreview();    // drag finished → the handles settle on the (stepped) plane
+
+/* ---- half a part: an arrow on the mirror plane ---- */
+const mirrorGizmo = new TransformGizmo({ scene, camera, renderer, controls, handles:['move'], axes:{move:['x']} });
+mirrorGizmo.space='world'; mirrorGizmo.size=0.22;
+const mirrorHandle = new THREE.Object3D();
+scene.add(mirrorHandle);
+mirrorGizmo.onChange=()=>mirrorGizmoMoved();
+mirrorGizmo.onDragEnd=()=>updateMirrorViz();
 
 /* ---- decorate step: combined move/rotate/scale gizmo for the placed object ---- */
 const decoGizmo = new TransformGizmo({ scene, camera, renderer, controls });
@@ -169,6 +174,20 @@ const decoGizmo = new TransformGizmo({ scene, camera, renderer, controls });
 const lsGizmo = new TransformGizmo({ scene, camera, renderer, controls, handles:['move','rotate','free'] });
 lsGizmo.space='world'; lsGizmo.size=0.18;
 lsGizmo.onChange=()=>lsOnGizmoChange();
+
+/* The step a length dragged in the view is rounded to: about what one screen pixel is worth at that place, as a round
+   number. So the numbers stay readable, zooming in gives finer steps, and a fine (Ctrl) drag — which moves a tenth as
+   far — is rounded a tenth as fine. Never coarser than 1 mm, never finer than 0.01 mm. */
+const NICE_STEPS=[0.01,0.02,0.05,0.1,0.2,0.5,1];
+function niceStep(x){ let s=NICE_STEPS[0]; for(const n of NICE_STEPS) if(n<=x) s=n; return s; }
+function viewStep(at, fine){
+  const h=renderer.domElement.clientHeight||800;
+  const mmPerPx=2*camera.position.distanceTo(at)*Math.tan(THREE.MathUtils.degToRad(camera.fov)/2)/h;
+  return niceStep(mmPerPx*(fine?0.1:1));
+}
+const snapTo=(v,step)=>+(Math.round(v/step)*step).toFixed(3);
+/* what a dot pulled to t (at that place in the view) comes to — Shift: whole millimetres */
+const pulled=(t,at,o)=> o.snap ? Math.round(t) : snapTo(t, viewStep(at, o.fine));
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202830, 1.1));
 const dir = new THREE.DirectionalLight(0xffffff, 1.4); dir.position.set(80,-120,200); scene.add(dir);
@@ -241,7 +260,14 @@ renderer.domElement.addEventListener('webglcontextrestored', ()=>{
   if(UI){ UI.glLost=''; status('The 3D view is back.','ok'); }
 });
 
-(function loop(){requestAnimationFrame(loop);controls.update();decoGizmo.update();lsGizmo.update();renderer.render(scene,camera);viewCube&&viewCube.update();})();
+(function loop(){
+  requestAnimationFrame(loop);
+  controls.update();
+  for(const g of [decoGizmo,lsGizmo,mateGizmo,cutGizmo,mirrorGizmo]) g.update();
+  pullDots.update();
+  renderer.render(scene,camera);
+  viewCube&&viewCube.update();
+})();
 
 /* ================================ STATE ================================== */
 /* Engine state — Three.js object refs + non-reactive bookkeeping. UI-bound
@@ -276,6 +302,7 @@ const S = {
   scales:[],             // per-link scale actually used (for status/debug)
   partEdges:null,        // LineSegments outline of the single part (x-ray)
   matePreview:null,      // ghost of the neighbouring link shown in step 2
+  mirrorViz:null,        // a half part's mirror plane on the Part page: the sheet and the ghost of the other half
   cutGeo:null, cutKey:'',// the part with its bottom cut off, as the links of the chain use it (see chainPartGeo) — and what it was made from
   cutViz:null,           // the flatten-bottom preview: sheet at the cut height, what is cut off in red, the cut line
   overrides:new Map(),   // link index → {geo,name}: that slot uses a custom model
@@ -391,7 +418,7 @@ function setBaseGeometry(geo, opts={}){
 
   if (S.partMesh){ scene.remove(S.partMesh); S.partMesh.geometry.dispose(); }
   if (S.matePreview){ scene.remove(S.matePreview); S.matePreview.material.dispose(); S.matePreview=null; }
-  if (UI){ UI.cutOn=false; UI.cutHeight=0; }                           // a cut belonged to the old part
+  if (UI){ UI.cutOn=false; UI.cutDepth=0; UI.cutTiltX=0; UI.cutTiltY=0; }   // a cut belonged to the old part
   clearCutPreview(); dropCutGeo();
   for (const i of [...S.overrides.keys()]) clearOverride(i);           // and any per-link swaps (slots no longer valid)
   if (S.overrideGroup){ scene.remove(S.overrideGroup); S.overrideGroup.traverse(o=>o.material&&o.material.dispose()); S.overrideGroup=null; }
@@ -429,14 +456,14 @@ function setBaseGeometry(geo, opts={}){
   } else {
     UI.mirrorDetectOut='';
   }
+  updateMirrorViz();
   status('Part loaded. Lay it flat the way it will print, then continue to Joints.','ok');
 }
 
 /* A new part → brush / morph sizes that suit ITS size (a fixed 8 mm brush swallows a 15 mm link whole). */
 function fitToolSizes(){
   const s=S.baseGeo.boundingBox.getSize(new THREE.Vector3()), big=Math.max(s.x,s.y,s.z)||10;
-  const half=v=>Math.max(0.5,Math.round(v*2)/2);          // 0.5 mm steps, like the sliders
-  UI.partSize=big;
+  const half=v=>Math.max(0.5,Math.round(v*2)/2);          // round numbers to start from
   UI.sculptRadius=half(big*0.12); UI.hmRadius=half(big*0.12);
   UI.hmStrength=Math.min(4,half(big*0.05));
   if(S.lsActiveNodeIdx<0){                                // (these two fields edit the selected morph point, if any)
@@ -450,7 +477,7 @@ function updateMeshChips(){
   const s=b.getSize(new THREE.Vector3());
   UI.chipMesh=`<b>${S.baseGeo.attributes.position.count.toLocaleString()}</b> verts · ${Math.round(triCount(S.baseGeo)).toLocaleString()} tris`;
   UI.chipSize=`bbox <b>${s.x.toFixed(1)}×${s.y.toFixed(1)}×${s.z.toFixed(1)}</b> mm`;
-  UI.cutMin=+b.min.z.toFixed(1); UI.cutMax=Math.max(UI.cutMin+0.1,+b.max.z.toFixed(1));     // the flatten-bottom slider spans the part's height
+  UI.partSize=Math.max(s.x,s.y,s.z)||10;
 }
 
 /* ------------------------------- CAMERA --------------------------------- *
@@ -551,7 +578,22 @@ function bakeMatrix(m){
     if(S.deco.mesh){ S.deco.mesh.applyMatrix4(m); S.deco.mesh.updateMatrix(); }
     if(S.deco.linkPreFuse){ S.deco.linkPreFuse.applyMatrix4(m); S.deco.linkPreFuse.computeBoundingBox(); S.deco.linkMeshId=null; }
   }
+  for(const nd of S.lsNodes){ nd.pos.applyMatrix4(m); nd.dir.transformDirection(m); lsPlaceNode(nd); }   // … and so do the morph points
+  if(S.lsNodes.length){ lsSyncTwins(); lsPreviewUpdate(); }
+  carryMirrorPlanes(m);
+  updateCutPreview(); updateMirrorViz();        // the flatten plane is counted from the part's lowest point: it is somewhere else now
   followContent();                              // the part moved → the view keeps looking at its middle
+}
+/* A mirror plane set as "X / Y / Z = so many mm" goes along with the part where it can: after a move or a quarter
+   turn it is still a plane across one of the axes. Turned by any other angle it cannot follow, and stays. */
+function carryMirrorPlanes(m){
+  const carry=(axis,offset)=>{
+    const pl=axisPlane(axis,offset); pl.p.applyMatrix4(m); pl.n.transformDirection(m);
+    const ax=['x','y','z'].find(k=>Math.abs(Math.abs(pl.n[k])-1)<1e-6);
+    return ax ? {axis:ax, offset:+pl.p[ax].toFixed(3)} : null;
+  };
+  if(UI.mirrorEnabled){ const r=carry(UI.mirrorAxis, UI.mirrorOffset); if(r){ UI.mirrorAxis=r.axis; UI.mirrorOffset=r.offset; } }
+  if(UI.sculptManual){ const r=carry(UI.sculptAxis, UI.sculptOffset); if(r){ UI.sculptAxis=r.axis; UI.sculptOffset=r.offset; } }
 }
 
 /* ----- AUTO-ALIGN via PCA ----- */
@@ -669,7 +711,7 @@ function exitSculpt(){
   // refresh everything downstream that reads S.baseGeo
   S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;   // chain build rebuilds via ensureBVH()
   S.meshDirty=true;
-  updatePartEdges(); updateDebugViz(); updateMeshChips(); setAnchorRanges();
+  updatePartEdges(); updateDebugViz(); updateMeshChips();
 }
 function sculptRepair(){
   if(!S.baseGeo) return;
@@ -742,6 +784,21 @@ window.addEventListener('keydown', ev=>{
   else if(k==='y'){ ev.preventDefault(); history.redo(); }
 });
 
+/* The brush is resized where it is used: Shift + scroll over the view, or [ and ] — a step of about a tenth. */
+function brushResize(dir){
+  const key = sculpt.active ? 'sculptRadius' : disp.active ? 'hmRadius' : null;
+  if(!key || !UI) return false;
+  const r=+UI[key]||1, st=niceStep(r*0.1);
+  UI[key]=Math.max(0.2, snapTo(r+dir*st, st));
+  return true;
+}
+window.addEventListener('keydown', ev=>{
+  if(ev.key!=='[' && ev.key!==']') return;
+  const t=ev.target;
+  if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable||t.closest?.('.monaco-editor'))) return;
+  if(brushResize(ev.key===']' ? 1 : -1)) ev.preventDefault();
+});
+
 function enterHeight(){
   if(!S.baseGeo) return;
   ensureBVH();
@@ -763,7 +820,7 @@ function exitHeight(){
   // same downstream invalidation as exitSculpt — geometry changed in place
   S.baseGeo.disposeBoundsTree?.(); S.baseGeo.boundsTree=null;
   S.meshDirty=true;
-  updatePartEdges(); updateDebugViz(); updateMeshChips(); setAnchorRanges();
+  updatePartEdges(); updateDebugViz(); updateMeshChips();
 }
 
 function clearHighlight(){ if(S.highlight){scene.remove(S.highlight);S.highlight.geometry.dispose();S.highlight=null;} }
@@ -795,43 +852,72 @@ function layFlat(){
   status('Laid flat on the picked face. Turn it 90° around Z if it points the wrong way.','ok');
 }
 
-/* ----- FLATTEN BOTTOM: slice off everything below a Z height, cap the new floor ----- */
+/* ----- FLATTEN THE BOTTOM: the links lose everything below a plane, and the new floor is closed -----
+   The plane belongs to the part, and it is set on the part: in the view an arrow pushes it through, two rings tilt
+   it, and a click on the part puts it there. It is measured from the part too — how far it lies above the part's
+   lowest point, seen along the plane — so it stays where it is on the part when the part is moved about.
+   A tilted plane, once used, IS the bottom: the part is turned until the plane is level (layOnPlane). So every other
+   page goes on working with a part that lies on the plate, and what a project stores is one number, cutUp. */
 const CUT_COL = { off:0xff4d4d, line:0xfff2a8 };
-/* stop moving the plane; a cut that is in use stays on show on the Part page */
+const CUT_MAX_TILT = 60;                       // degrees
+const Z_UP = new THREE.Vector3(0,0,1);
+/* how far a geometry reaches along a direction */
+function extentAlong(geo, n){
+  const pos=geo.attributes.position, v=new THREE.Vector3();
+  let lo=Infinity, hi=-Infinity;
+  for(let i=0;i<pos.count;i++){ const t=v.fromBufferAttribute(pos,i).dot(n); if(t<lo) lo=t; if(t>hi) hi=t; }
+  return {lo,hi};
+}
+/* A plane on the part, from two tilts (degrees about X and about Y, as the red and the green ring turn it) and its
+   depth: n — its normal, pointing at what is kept · up — mm above the part's lowest point along n · d — the plane is
+   n·x = d · lo, span — where the part begins along n and how far it goes · c — the middle of the sheet */
+function cutPlane(tiltX=UI.cutTiltX, tiltY=UI.cutTiltY, depth=UI.cutDepth){
+  const rad=v=>THREE.MathUtils.degToRad(THREE.MathUtils.clamp(+v||0, -CUT_MAX_TILT, CUT_MAX_TILT));
+  const n=new THREE.Vector3(Math.tan(rad(tiltY)), -Math.tan(rad(tiltX)), 1).normalize();
+  const {lo,hi}=extentAlong(S.baseGeo,n), span=hi-lo;
+  const up=THREE.MathUtils.clamp(+depth||0, 0, span), d=lo+up;
+  const c=partCenter(); c.addScaledVector(n, d-c.dot(n));
+  return {n, up, d, lo, span, c};
+}
+const cutTilted = ()=>!!((+UI.cutTiltX||0) || (+UI.cutTiltY||0));
+const fmtLen = v=>(+(+v).toFixed(2)).toString();        // a length for a sentence: two decimals at most, no trailing zeros
+/* stop setting the plane; a cut that is in use stays on show on the Part page */
 function clearCutPreview(){
   if(!UI) return;
+  if(UI.arm==='cutPick') setArm(null);
   UI.cutPreview=false; updateCutPreview();
 }
 function hideCutViz(){
   if(S.cutViz){ scene.remove(S.cutViz); S.cutViz.traverse(o=>{ if(o!==S.cutViz.userData.off) o.geometry?.dispose(); o.material?.dispose(); }); S.cutViz=null; }
-  cutXform.detach(); cutXform.visible=false; cutXform.enabled=false;
+  cutGizmo.detach(); cutGizmo.disable();
 }
-/* where the plane z = h cuts the part: one line segment per crossed triangle, as [x,y, x,y, …] */
-function cutSegments(h){
+/* where the plane n·x = d cuts the part: one line segment per crossed triangle, as [x,y,z, x,y,z, …] */
+function cutSegments(n, d){
   ensureBVH();
-  const out=[], P=[null,null,null];
+  const out=[], P=[null,null,null], D=[0,0,0], plane=new THREE.Plane(n,-d);
   S.baseGeo.boundsTree.shapecast({
-    intersectsBounds: box=>box.min.z<=h && box.max.z>=h,
+    intersectsBounds: box=>plane.intersectsBox(box),
     intersectsTriangle: tri=>{
       P[0]=tri.a; P[1]=tri.b; P[2]=tri.c;
+      for(let i=0;i<3;i++) D[i]=P[i].dot(n)-d;
       for(let i=0;i<3;i++){
-        const a=P[i], b=P[(i+1)%3];
-        if((a.z<h)===(b.z<h)) continue;                 // this edge does not cross the plane
-        const t=(h-a.z)/(b.z-a.z);
-        out.push(a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t);
+        const j=(i+1)%3, a=P[i], b=P[j];
+        if((D[i]<0)===(D[j]<0)) continue;               // this edge does not cross the plane
+        const t=D[i]/(D[i]-D[j]);
+        out.push(a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t, a.z+(b.z-a.z)*t);
       }
     }
   });
   return out;
 }
-/* The cut on the Part page: a sheet at the cut height, everything below it — what the links lose — in red, and the
+/* The cut on the Part page: a sheet where the plane is, everything below it — what the links lose — in red, and the
    line where the sheet goes through the part (the edge of the new bottom) as a bright band. Shown while the plane is
-   being moved (with its arrow), and for as long as a cut is in use. The part itself is never cut. */
+   being set (with its handles), and for as long as a cut is in use. The part itself is never cut. */
 function updateCutPreview(){
   const edit=UI.cutPreview;
   if(!S.baseGeo || S.uiStep!=='s1' || !(edit || UI.cutOn)){ hideCutViz(); return; }
   S.baseGeo.computeBoundingBox();
-  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3()), h=edit?UI.cutHeight:UI.cutAt;
+  const s=S.baseGeo.boundingBox.getSize(new THREE.Vector3()), pl=edit ? cutPlane() : cutPlane(0,0,UI.cutUp);
   if(!S.cutViz){
     const g=S.cutViz=new THREE.Group();
     const sheet=new THREE.Mesh(new THREE.PlaneGeometry(1,1),
@@ -839,7 +925,7 @@ function updateCutPreview(){
     sheet.renderOrder=996;
     const off=new THREE.Mesh(S.baseGeo, new THREE.MeshBasicMaterial({color:CUT_COL.off,transparent:true,opacity:.62,side:THREE.DoubleSide,
       depthWrite:false,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1,     // lies on the part's own surface
-      clippingPlanes:[new THREE.Plane(new THREE.Vector3(0,0,-1),0)]}));                     // only what is below the sheet
+      clippingPlanes:[new THREE.Plane()]}));                                                // only what is below the sheet
     off.renderOrder=997;
     const band=new THREE.Mesh(new THREE.BufferGeometry(),
       new THREE.MeshBasicMaterial({color:CUT_COL.line,side:THREE.DoubleSide,depthTest:false,transparent:true}));
@@ -850,50 +936,88 @@ function updateCutPreview(){
     g.add(sheet,off,band,line); g.userData={sheet,off,band,line};
     scene.add(g);
   }
-  if(edit && !cutXform.object){ cutXform.attach(cutHandle); cutXform.visible=true; cutXform.enabled=true; }
-  if(!edit && cutXform.object){ cutXform.detach(); cutXform.visible=false; cutXform.enabled=false; }
-  const {sheet,off,band,line}=S.cutViz.userData;
+  if(edit){ cutGizmo.enable(); if(cutGizmo.object!==cutHandle) cutGizmo.attach(cutHandle); }
+  else{ cutGizmo.detach(); cutGizmo.disable(); }
+  const {sheet,off,band,line}=S.cutViz.userData, q=new THREE.Quaternion().setFromUnitVectors(Z_UP, pl.n);
   if(off.geometry!==S.baseGeo) off.geometry=S.baseGeo;
-  const cx=(b.min.x+b.max.x)/2, cy=(b.min.y+b.max.y)/2;
   sheet.scale.set(s.x*1.4+10, s.y*1.4+10, 1);
-  sheet.position.set(cx,cy,h);
-  off.material.clippingPlanes[0].constant=h;
-  if(!cutXform.dragging) cutHandle.position.set(cx,cy,h);
-  const seg=cutSegments(h), w=Math.max(0.12, s.length()*0.006)/2;     // half the band's width, in mm
-  const lp=[], bp=[];
-  for(let i=0;i+3<seg.length;i+=4){
-    const x1=seg[i], y1=seg[i+1], x2=seg[i+2], y2=seg[i+3];
-    let nx=y2-y1, ny=x1-x2; const l=Math.hypot(nx,ny); if(l<1e-9) continue;
-    nx*=w/l; ny*=w/l;
-    lp.push(x1,y1,h, x2,y2,h);
-    bp.push(x1+nx,y1+ny,h, x2+nx,y2+ny,h, x2-nx,y2-ny,h,  x1+nx,y1+ny,h, x2-nx,y2-ny,h, x1-nx,y1-ny,h);
+  sheet.position.copy(pl.c); sheet.quaternion.copy(q);
+  off.material.clippingPlanes[0].set(pl.n.clone().negate(), pl.d);
+  if(!cutGizmo.dragging){ cutHandle.position.copy(pl.c); cutHandle.quaternion.copy(q); }
+  const seg=cutSegments(pl.n, pl.d), w=Math.max(0.12, s.length()*0.006)/2;     // half the band's width, in mm
+  const lp=[], bp=[], a=new THREE.Vector3(), b=new THREE.Vector3(), o=new THREE.Vector3();
+  for(let i=0;i+5<seg.length;i+=6){
+    a.set(seg[i],seg[i+1],seg[i+2]); b.set(seg[i+3],seg[i+4],seg[i+5]);
+    o.subVectors(b,a).cross(pl.n); const l=o.length(); if(l<1e-9) continue;
+    o.multiplyScalar(w/l);                                                     // across the line, in the plane
+    lp.push(a.x,a.y,a.z, b.x,b.y,b.z);
+    bp.push(a.x+o.x,a.y+o.y,a.z+o.z, b.x+o.x,b.y+o.y,b.z+o.z, b.x-o.x,b.y-o.y,b.z-o.z,
+            a.x+o.x,a.y+o.y,a.z+o.z, b.x-o.x,b.y-o.y,b.z-o.z, a.x-o.x,a.y-o.y,a.z-o.z);
   }
   band.geometry.setAttribute('position', new THREE.Float32BufferAttribute(bp,3));
   line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(lp,3));
+  UI.cutSpan=+pl.span.toFixed(3);
 }
-/* "Flatten the bottom" was opened (or the Part page reopened with it open): the plane starts through the middle of the part */
-function startCutPreview(center){
+/* a number changed, a handle moved: the picture follows on the next frame (several of them change together) */
+let cutRaf=0;
+function cutPreviewSoon(){ if(!cutRaf) cutRaf=requestAnimationFrame(()=>{ cutRaf=0; updateCutPreview(); }); }
+/* A handle on the plane was dragged. The arrow pushes the plane along its normal; a ring tilts it about its middle,
+   so the depth — counted from the lowest point as seen along the plane — changes with the tilt. */
+function cutGizmoMoved(){
+  const n=Z_UP.clone().applyQuaternion(cutHandle.quaternion).normalize();
+  const deg=THREE.MathUtils.radToDeg, fine=cutGizmo.fine;
+  const tilt=v=>THREE.MathUtils.clamp(snapTo(deg(v), fine?0.01:0.1), -CUT_MAX_TILT, CUT_MAX_TILT);
+  if(cutGizmo.drag && cutGizmo.drag.handle.kind==='rotate' && n.z>0.05){
+    UI.cutTiltX=tilt(Math.atan2(-n.y,n.z)); UI.cutTiltY=tilt(Math.atan2(n.x,n.z));
+  }
+  const pl=cutPlane(UI.cutTiltX, UI.cutTiltY, 0);
+  UI.cutDepth=THREE.MathUtils.clamp(snapTo(pl.n.dot(cutHandle.position)-pl.lo, viewStep(cutHandle.position, fine)), 0, +pl.span.toFixed(2));
+  status(`Cuts off the lowest ${fmtLen(UI.cutDepth)} mm`+(cutTilted() ? ` · tilted ${fmtLen(UI.cutTiltX)}° about X, ${fmtLen(UI.cutTiltY)}° about Y` : '')+(fine ? ' · fine' : ''));
+  cutPreviewSoon();
+}
+/* "Click the part where to cut": the plane — tilted as it is — goes through that point */
+function cutThrough(p){
+  const pl=cutPlane(UI.cutTiltX, UI.cutTiltY, 0);
+  UI.cutDepth=THREE.MathUtils.clamp(snapTo(pl.n.dot(p)-pl.lo, 0.01), 0, +pl.span.toFixed(2));
+  updateCutPreview();
+}
+/* "Flatten the bottom" was opened (or the Part page reopened with it open): the plane is where the cut in use is —
+   or, without one, a little above the bottom, which is where flattening happens */
+function startCutPreview(){
   if(!S.baseGeo || S.uiStep!=='s1') return;
   S.baseGeo.computeBoundingBox();
-  const b=S.baseGeo.boundingBox;
-  if(UI.cutOn) UI.cutHeight=UI.cutAt;                                  // a cut in use: that is where the plane is
-  else if(center || !(UI.cutHeight>b.min.z && UI.cutHeight<b.max.z)) UI.cutHeight=+((b.min.z+b.max.z)/2).toFixed(1);
+  const h=S.baseGeo.boundingBox.getSize(new THREE.Vector3()).z;
+  if(UI.cutOn){ UI.cutDepth=UI.cutUp; UI.cutTiltX=0; UI.cutTiltY=0; }
+  else if(!(UI.cutDepth>0 && UI.cutDepth<cutPlane().span)){ UI.cutDepth=+Math.min(2, h*0.1).toFixed(1); UI.cutTiltX=0; UI.cutTiltY=0; }
   UI.cutPreview=true; updateCutPreview();
-  status('Drag the blue arrow up or down: everything shown in red is cut off.');
+  status('Drag the arrow to move the plane and the rings to tilt it — everything shown in red is cut off.');
 }
-/* "Use this cut" / "Remove the cut": the height is a setting of the project — the links of the chain are cut there,
+/* Turn the part until the plane is level — what was tilted becomes the bottom — and set it back down at the height
+   it was resting at. Whatever sits on the part goes along (bakeMatrix); the joint moves with it over the plate, and
+   a height step stays what it is. */
+function layOnPlane(pl){
+  const b=S.baseGeo.boundingBox, q=new THREE.Quaternion().setFromUnitVectors(pl.n, Z_UP);
+  const m=new THREE.Matrix4().makeTranslation(pl.c.x, pl.c.y, b.min.z+pl.up)
+    .multiply(new THREE.Matrix4().makeRotationFromQuaternion(q))
+    .multiply(new THREE.Matrix4().makeTranslation(-pl.c.x,-pl.c.y,-pl.c.z));
+  for(const a of [UI.pin,UI.hole]){ const v=new THREE.Vector3(a.x,a.y,a.z||0).applyMatrix4(m); a.x=+v.x.toFixed(3); a.y=+v.y.toFixed(3); }
+  bakeMatrix(m);
+  syncGizmos();
+}
+/* "Use this cut" / "Remove the cut": the cut is a setting of the project — the links of the chain are cut there,
    the part keeps its shape (and so does the mesh saved with the project). */
 async function applyCut(){
   if(!S.baseGeo) return;
-  const z=UI.cutHeight;
-  S.baseGeo.computeBoundingBox();
-  const b=S.baseGeo.boundingBox;
-  if(!(z>b.min.z)){ status('The cut height is at the very bottom — nothing would be cut off.','warn'); return; }
-  if(z>=b.max.z){ status('Cut height is at or above the part — nothing would be left.','err'); return; }
-  UI.cutAt=z; UI.cutOn=true;
+  const pl=cutPlane(), tilted=cutTilted();
+  if(!(pl.up>0)){ status('The plane lies under the part — nothing would be cut off.','warn'); return; }
+  if(pl.up>=pl.span){ status('The plane lies above the part — nothing would be left.','err'); return; }
   status('Cutting…'); await new Promise(r=>setTimeout(r,10));     // let the status line repaint
-  if(!cutChanged()){ UI.cutOn=false; cutChanged(); status('This part could not be cut at that height.','err'); return; }
-  status(`The links are cut ${(z-b.min.z).toFixed(1)} mm above the bottom. The part itself stays as it is.`,'ok');
+  if(tilted) layOnPlane(pl);
+  UI.cutTiltX=0; UI.cutTiltY=0; UI.cutDepth=UI.cutUp=pl.up; UI.cutOn=true;
+  if(!cutChanged()){ UI.cutOn=false; cutChanged(); status('This part could not be cut there.','err'); return; }
+  status(`The links are cut ${fmtLen(pl.up)} mm above their lowest point. `
+    + (tilted ? 'The part was turned so that the new bottom lies on the plate'+(anchorsValid() ? ' — look at the Joints page again, the next link was set for the part as it lay before.' : '.')
+              : 'The part itself stays whole.'), 'ok');
 }
 function removeCut(){
   if(!UI.cutOn) return;
@@ -913,13 +1037,17 @@ function dropCutGeo(){
   S.cutGeo=null; S.cutKey='';
 }
 /* What the links of the chain are made of: the part — with its bottom cut off where "Flatten the bottom" says so.
-   Made when first needed and again when the part or the height has changed. */
+   Made when first needed and again when the part or the cut has changed. */
 function chainPartGeo(){
   if(!UI || !UI.cutOn || !S.baseGeo) return S.baseGeo;
   const pos=S.baseGeo.attributes.position, col=S.baseGeo.attributes.color;
-  const key=[S.baseGeo.uuid, pos.version, col?col.version:'', UI.cutAt].join('|');
-  if(S.cutKey!==key){ dropCutGeo(); S.cutKey=key; S.cutGeo=cutPart(S.baseGeo, UI.cutAt); }
-  return S.cutGeo || S.baseGeo;                       // null: nothing to cut at that height, or the cut failed
+  const key=[S.baseGeo.uuid, pos.version, col?col.version:'', UI.cutUp].join('|');
+  if(S.cutKey!==key){
+    dropCutGeo(); S.cutKey=key;
+    S.baseGeo.computeBoundingBox();
+    S.cutGeo=cutPart(S.baseGeo, S.baseGeo.boundingBox.min.z+UI.cutUp);   // cutUp counts from the part's lowest point
+  }
+  return S.cutGeo || S.baseGeo;                       // null: nothing to cut there, or the cut failed
 }
 /* how far the cut part was moved down to sit on the plate again (things placed on the part — morph points — go along) */
 function cutShift(){ return (UI && UI.cutOn && chainPartGeo()===S.cutGeo && S.cutGeo) ? S.cutGeo.userData.shift : 0; }
@@ -1081,6 +1209,49 @@ function buildSymLines(){
   scene.add(S.symGroup);
 }
 
+/* ----- HALF A PART: the mirror plane in the view -----
+   While "Symmetry & mirroring" is open on the Part page and the part is a half: the plane as a sheet, the other half
+   as a ghost — what the full link will be — and an arrow that pushes the plane along its axis. */
+const MIRROR_COL = 0xff3df0;
+function dropMirrorViz(){
+  if(!S.mirrorViz) return;
+  const {sheet,ghost}=S.mirrorViz.userData;
+  scene.remove(S.mirrorViz); sheet.geometry.dispose(); sheet.material.dispose(); ghost.material.dispose();
+  S.mirrorViz=null;
+}
+function updateMirrorViz(){
+  if(!(UI && UI.mirrorFold && UI.mirrorEnabled && S.baseGeo && S.uiStep==='s1')){
+    dropMirrorViz(); mirrorGizmo.detach(); mirrorGizmo.disable(); return;
+  }
+  if(S.mirrorViz && S.mirrorViz.userData.ghost.geometry!==S.baseGeo) dropMirrorViz();   // another part (it may have colours now, or none)
+  if(!S.mirrorViz){
+    const g=S.mirrorViz=new THREE.Group();
+    const sheet=new THREE.Mesh(new THREE.PlaneGeometry(1,1),
+      new THREE.MeshBasicMaterial({color:MIRROR_COL,transparent:true,opacity:.14,side:THREE.DoubleSide,depthWrite:false}));
+    sheet.renderOrder=996;
+    const ghost=new THREE.Mesh(S.baseGeo, partMaterial(S.baseGeo,{side:THREE.DoubleSide,transparent:true,opacity:.42,depthWrite:false}));
+    ghost.matrixAutoUpdate=false; ghost.renderOrder=1;
+    g.add(sheet,ghost); g.userData={sheet,ghost};
+    scene.add(g);
+  }
+  const {sheet,ghost}=S.mirrorViz.userData, ax=UI.mirrorAxis, off=+UI.mirrorOffset||0;
+  S.baseGeo.computeBoundingBox();
+  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3()), c=b.getCenter(new THREE.Vector3());
+  const k=new THREE.Vector3(1,1,1), t=new THREE.Vector3(); k[ax]=-1; t[ax]=2*off;
+  ghost.matrix.makeScale(k.x,k.y,k.z).setPosition(t); ghost.matrixWorldNeedsUpdate=true;   // the half, seen in the plane
+  c[ax]=off;
+  const pad=v=>v*1.3+6;
+  sheet.position.copy(c);
+  sheet.quaternion.setFromUnitVectors(Z_UP, axisPlane(ax,0).n);
+  if(ax==='x') sheet.scale.set(pad(s.z),pad(s.y),1); else if(ax==='y') sheet.scale.set(pad(s.x),pad(s.z),1); else sheet.scale.set(pad(s.x),pad(s.y),1);
+  mirrorGizmo.setAxes('move',[ax]);
+  if(!mirrorGizmo.dragging) mirrorHandle.position.copy(c);
+  mirrorGizmo.enable(); if(mirrorGizmo.object!==mirrorHandle) mirrorGizmo.attach(mirrorHandle);
+}
+function mirrorGizmoMoved(){
+  UI.mirrorOffset=snapTo(mirrorHandle.position[UI.mirrorAxis], viewStep(mirrorHandle.position, mirrorGizmo.fine));
+}
+
 /* ======================================================================== *
  *  STEP 2 — LINK OFFSET + PIVOT (stored as the PIN / HOLE anchor points)
  * ======================================================================== */
@@ -1140,17 +1311,6 @@ function buildGizmos(){
 function syncGizmos(){
   if(pivotGizmo){ pivotGizmo.position.set(UI.pin.x,UI.pin.y,UI.pin.z||0); pivotGizmo.visible=pivotShown(); }
   syncMatePreview();
-}
-/* Bound the sliders: the offset to a bit more than one part length either way, the pivot to the part's footprint (+30%). */
-function setAnchorRanges(){
-  if(!S.baseGeo) return;
-  S.baseGeo.computeBoundingBox();
-  const b=S.baseGeo.boundingBox, s=b.getSize(new THREE.Vector3()), d=linkOffset();
-  const padX=Math.max(2,s.x*0.3), padY=Math.max(2,s.y*0.3);
-  UI.anchorXmin=+(b.min.x-padX).toFixed(1); UI.anchorXmax=+(b.max.x+padX).toFixed(1);
-  UI.anchorYmin=+(b.min.y-padY).toFixed(1); UI.anchorYmax=+(b.max.y+padY).toFixed(1);
-  const span=(size,cur)=>Math.ceil(Math.max(2, size*1.3, Math.abs(cur)*1.2));   // a saved offset always fits its slider
-  UI.offXmax=span(s.x,d.x); UI.offYmax=span(s.y,d.y); UI.offZmax=span(s.z,d.z);
 }
 function anchorsValid(){
   if(linkOffset().length()<1e-3){
@@ -1483,6 +1643,38 @@ function regeneratePathFromSliders(){
   if(pathEditor){ pathEditor.setValue(code); }   // change listener recompiles + regens
   else applyPathCode(code);
 }
+/* A spiral's two lengths are dots to pull, on the plate: from its middle out to where the chain begins (start radius)
+   and on to the next loop (loop spacing), with a line from the middle through both. They belong to the spiral the
+   two numbers describe — a path written by hand has none. */
+const X_AXIS = new THREE.Vector3(1,0,0);
+const spiralRule = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), X_AXIS]),
+  new THREE.LineBasicMaterial({color:0xffffff, transparent:true, opacity:.5, depthTest:false}));
+spiralRule.renderOrder=1000; spiralRule.visible=false; scene.add(spiralRule);
+const spiralStart = ()=>Math.max(0, +UI.startR||0);
+const spiralMemo = {fn:null, a:NaN, b:NaN, ok:false};
+function pathIsSpiral(){                       // judged by where the path goes, not by its text (older projects word it differently)
+  const r=n=>Math.round(n*1000)/1000, a=r(spiralStart()), b=r(UI.spacing/(2*Math.PI)), m=spiralMemo;
+  if(m.fn!==S.pathFn || m.a!==a || m.b!==b){
+    m.fn=S.pathFn; m.a=a; m.b=b;
+    m.ok=[0,1.3,7.7,40].every(t=>{ const q=pathPoint(t,0,0,0), rr=a+b*t; return Math.hypot(q.x-rr*Math.cos(t), q.y-rr*Math.sin(t))<1e-6*(1+rr) && Math.abs(q.z)<1e-9; });
+  }
+  return m.ok;
+}
+function spiralDotsShown(){
+  const show = !!UI && S.uiStep==='s3' && UI.shape==='spiral' && S.poses.length>0 && pathIsSpiral();
+  spiralRule.visible=show;
+  if(show) spiralRule.scale.x=Math.max(1e-3, spiralStart()+(+UI.spacing||0));
+  return show;
+}
+pullDots.add({ color:0x4cc2ff, title:'Start radius: pull to set the size of the hole in the middle',
+  line:()=> spiralDotsShown() ? {origin:spiralRule.position, dir:X_AXIS, t:spiralStart()} : null,
+  pull:(t,o)=>{ UI.startR=Math.max(0, pulled(t, X_AXIS.clone().multiplyScalar(t), o)); },
+  end:()=>followContent() });                  // (the view holds still during a pull, and catches up with the chain after it)
+pullDots.add({ color:0x7ee787, title:'Loop spacing: pull to set the distance from one turn to the next',
+  line:()=> spiralRule.visible ? {origin:X_AXIS.clone().multiplyScalar(spiralStart()), dir:X_AXIS, t:+UI.spacing||0} : null,
+  pull:(t,o)=>{ UI.spacing=Math.max(0.5, pulled(t, X_AXIS.clone().multiplyScalar(spiralStart()+t), o)); },
+  end:()=>followContent() });
+
 let pathEditor=null;
 async function ensurePathEditor(){
   if(pathEditor) return;
@@ -1812,10 +2004,12 @@ function regen(force){
   const plate=P().plate;
   const off = fs.x>plate||fs.y>plate;
   updatePlate(plate, off);
-  if(!doCheck){UI.chipCollide=`<span class="warn">${poses.length} links — press “Re-check”</span>`;}
-  else if(bad.size===0){UI.chipCollide=`<span class="ok">✓ no overlaps</span> · ${pairs} pairs tested`;}
-  else{UI.chipCollide=`<span class="err">✗ ${bad.size} links overlap</span>`;}
-  UI.chipSize=`footprint <b>${fs.x.toFixed(0)}×${fs.y.toFixed(0)}</b> mm`;
+  if(viewKind(S.uiStep)==='chain'){         // (rebuilt from a part page — a cut, a mirror plane — the chips go on describing the part)
+    if(!doCheck){UI.chipCollide=`<span class="warn">${poses.length} links — press “Re-check”</span>`;}
+    else if(bad.size===0){UI.chipCollide=`<span class="ok">✓ no overlaps</span> · ${pairs} pairs tested`;}
+    else{UI.chipCollide=`<span class="err">✗ ${bad.size} links overlap</span>`;}
+    UI.chipSize=`footprint <b>${fs.x.toFixed(0)}×${fs.y.toFixed(0)}</b> mm`;
+  }
   // the same facts, structured, for the status card on the Chain / Export pages
   UI.chainState = !doCheck ? 'unchecked' : bad.size ? 'bad' : 'ok';
   UI.chainBad=bad.size; UI.chainFoot=`${fs.x.toFixed(0)} × ${fs.y.toFixed(0)} mm`; UI.chainOff=off;
@@ -2234,7 +2428,7 @@ function gatherConfig(opts={}){
     mirrorPlane:{manual:UI.sculptManual,axis:UI.sculptAxis,offset:UI.sculptOffset},   // set by hand (Sculpt / Morph); the detected lines are symPlanes
     meshId:S.meshId,                          // aligned mesh stored in data/meshes/ on the server
     colorShades:UI.colorShades, purify:UI.purify,   // a coloured part is re-quantized with these on load
-    cut: UI.cutOn ? UI.cutAt : null,                // "Flatten the bottom": the links are cut at this height (the mesh is the whole part)
+    cutUp: UI.cutOn ? UI.cutUp : null,              // "Flatten the bottom": the links are cut this far above the part's lowest point (the mesh is the whole part)
   };
   if(opts.inlineGeometry && S.baseGeo){
     cfg.geometry=Array.from(S.baseGeo.attributes.position.array);
@@ -2298,7 +2492,10 @@ async function applyConfig(cfg){
       S.meshId=null;
     }
     S.meshDirty=false;                          // whatever we just loaded is the current saved mesh
-    if(Number.isFinite(cfg.cut)){ UI.cutAt=cfg.cut; UI.cutOn=true; } else UI.cutOn=false;
+    if(Number.isFinite(cfg.cutUp)){ UI.cutUp=cfg.cutUp; UI.cutOn=true; }
+    else if(Number.isFinite(cfg.cut) && S.baseGeo){ UI.cutUp=cfg.cut-S.baseGeo.boundingBox.min.z; UI.cutOn=true; }   // older projects stored the height on the plate
+    else UI.cutOn=false;
+    UI.cutDepth=UI.cutOn?UI.cutUp:0; UI.cutTiltX=0; UI.cutTiltY=0;
     dropCutGeo();
     if(cfg.pin) Object.assign(UI.pin,cfg.pin);
     if(cfg.hole) Object.assign(UI.hole,cfg.hole);
@@ -2365,7 +2562,6 @@ async function applyConfig(cfg){
       catch(err){ status('The decoration failed to load: '+err.message,'err'); }
     }
     markDone('s1'); markDone('s2'); unlock('s2'); unlock('s3'); unlock('s4'); buildGizmos();
-    setAnchorRanges();
     ensureScaleEditor(); ensureColorEditor(); ensurePathEditor(); openStep('s3',true);   // rebuilds + frames the chain
     UI.dropHide=true;
   } finally { UI._loading=false; }
@@ -2641,18 +2837,19 @@ function syncMatePreview(){
     : hit ? 'The two links still touch — they would fuse when printed. The yellow line shows where; move the next link a little further.'
     : 'The two links don’t touch — they print as separate, moving pieces.';
 }
-/* the X / Y arrows sit on the middle of the next link, wherever it is shown */
+/* the arrows sit on the middle of the next link, wherever it is shown: X and Y slide it over the plate, and while
+   "Height step and pivot" is open there is a third one for the height */
 function syncMateGizmo(){
   const show=!!(S.matePreview && S.matePreview.visible);
-  if(show && !mateXform.dragging) mateHandle.position.copy(partCenter()).add(linkOffset());
-  if(show && mateXform.object!==mateHandle) mateXform.attach(mateHandle);
-  if(!show && mateXform.object) mateXform.detach();
-  mateXform.enabled=mateXform.visible=show;
+  if(show && !mateGizmo.dragging) mateHandle.position.copy(partCenter()).add(linkOffset());
+  mateGizmo.setAxes('move', pivotShown() ? ['x','y','z'] : ['x','y']);
+  if(show){ mateGizmo.enable(); if(mateGizmo.object!==mateHandle) mateGizmo.attach(mateHandle); }
+  else{ mateGizmo.detach(); mateGizmo.disable(); }
 }
 function mateGizmoMoved(){
-  const c=partCenter(), ax=mateXform.axis||'', mm=v=>Math.round(v*10)/10;   // 0.1 mm steps, like the sliders
-  if(ax.includes('X')) setLinkOffset('x', mm(mateHandle.position.x-c.x));   // only the dragged axis — the other keeps its exact value
-  if(ax.includes('Y')) setLinkOffset('y', mm(mateHandle.position.y-c.y));
+  const ax=mateGizmo.drag && mateGizmo.drag.handle.axis; if(!ax) return;
+  // only the dragged axis — the others keep their exact values
+  setLinkOffset(ax, snapTo(mateHandle.position[ax]-partCenter()[ax], viewStep(mateHandle.position, mateGizmo.fine)));
 }
 
 /* ---- DETAIL: THE PART · THE FAST PREVIEW · THE FILE ----
@@ -2858,6 +3055,7 @@ function swapBaseGeometry(geo, {weld=true}={}){
   history?.clear();                                        // topology changed → old snapshots are invalid
   if(UI) UI.partHasColor=hasVColor(geo);
   updatePartEdges(); updateDebugViz(); updateMeshChips();
+  updateCutPreview(); updateMirrorViz();
   followContent();                                         // e.g. a cut or a fused object changed the part's extent
 }
 let simplifier=null;             // the meshopt simplifier once it has loaded · false: it could not be loaded
@@ -3213,7 +3411,7 @@ function lsSyncTwins(){
   S.lsNodes.forEach((n,i)=>{
     if(!n.mirror) return;
     const t=lsTwin(n,pl), col=i===S.lsActiveNodeIdx?LS_COL_ACTIVE:LS_COL_IDLE;
-    const arrow=lsMakeArrow(t.pos,t.dir,t.radius,col), sphere=lsMakeSphere(t.pos,t.radius,col);
+    const arrow=lsMakeArrow(t.pos,t.dir,t.intensity,col), sphere=lsMakeSphere(t.pos,t.radius,col);
     for(const m of [arrow.line.material, arrow.cone.material]){ m.transparent=true; m.opacity=0.45; }
     sphere.material.opacity=0.09;
     lsTwinGroup.add(arrow,sphere);
@@ -3229,12 +3427,32 @@ function lsDropViz(o){
 /* the mirror plane moved (other symmetry line, set by hand, half part on / off) */
 function lsPlaneChanged(){ if(S.lsNodes.some(n=>n.mirror)){ lsSyncTwins(); lsPreviewUpdate(); } }
 
-function lsMakeArrow(pos, dir, radius, color){
-  const len=radius*1.4;
-  const ah=new THREE.ArrowHelper(dir.clone().normalize(), pos.clone(), len, color, len*0.28, len*0.14);
-  ah.renderOrder=998;
+/* the arrow of a point is as long as the point pushes: its tip is where the surface under it ends up on the last link
+   (a negative amount points the other way) */
+function lsMakeArrow(pos, dir, amount, color){
+  const len=Math.max(Math.abs(amount)||0, 1e-3), head=Math.min(len*0.4, (UI?UI.partSize:40)*0.09);
+  const ah=new THREE.ArrowHelper(lsArrowDir(dir,amount), pos.clone(), len, color, head, head*0.5);
+  for(const o of [ah.line, ah.cone]){ o.material.depthTest=false; o.renderOrder=998; }   // also where it goes through the part
   return ah;
 }
+const lsArrowDir=(dir,amount)=>dir.clone().normalize().multiplyScalar(amount<0?-1:1);
+/* a point was moved or turned: its marks in the view follow */
+function lsPlaceNode(node){
+  node.pivot.position.copy(node.pos);
+  node.pivot.quaternion.setFromUnitVectors(Z_UP, node.dir);
+  node.arrowHelper.position.copy(node.pos);
+  node.arrowHelper.setDirection(lsArrowDir(node.dir,node.intensity));
+  node.sphereViz.position.copy(node.pos);
+}
+/* The selected point's two lengths are dots to pull, on the point itself: at the tip of its arrow how far it pushes,
+   on its sphere how far it reaches. */
+const lsActive = ()=> (S.uiStep==='lsculpt' && S.lsActiveNodeIdx>=0 && S.lsNodes[S.lsActiveNodeIdx]) || null;
+pullDots.add({ color:LS_COL_ACTIVE, title:'Amount: pull to set how far the surface moves',
+  line:()=>{ const n=lsActive(); return n ? {origin:n.pos, dir:n.dir, t:n.intensity} : null; },
+  pull:(t,o)=>{ const n=lsActive(); if(n) UI.lsIntensity=pulled(t,n.pos,o); } });
+pullDots.add({ color:0x6fd6ff, title:'Reach: pull to set how far around the point the surface moves',
+  line:()=>{ const n=lsActive(); return n ? {origin:n.pos, dir:new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,0), t:n.radius} : null; },
+  pull:(t,o)=>{ const n=lsActive(); if(n) UI.lsRadius=Math.max(0.5, pulled(t,n.pos,o)); } });
 
 function lsMakeSphere(pos, radius, color){
   const g=new THREE.SphereGeometry(radius,16,8);
@@ -3262,7 +3480,7 @@ function lsAddNode(pos, initialDir, mirror){
   if(Math.abs(dir.dot(base))<0.999) pivot.quaternion.setFromUnitVectors(base,dir);
   lsGroup.add(pivot);
 
-  const arrowHelper=lsMakeArrow(pos,dir,radius,LS_COL_IDLE);
+  const arrowHelper=lsMakeArrow(pos,dir,intensity,LS_COL_IDLE);
   const sphereViz=lsMakeSphere(pos,radius,LS_COL_IDLE);
   lsGroup.add(arrowHelper,sphereViz);
 
@@ -3313,7 +3531,7 @@ function lsSyncNodeList(){
   if(!UI) return;
   UI.lsNodes=S.lsNodes.map((n,i)=>({
     idx:i,
-    label:`Point ${i+1} · ${n.mode} ${n.intensity} mm · reach ${n.radius} mm${n.mirror?' · mirrored':''}`,
+    label:`Point ${i+1} · ${n.mode} ${fmtLen(n.intensity)} mm · reach ${fmtLen(n.radius)} mm${n.mirror?' · mirrored':''}`,
   }));
 }
 
@@ -3332,7 +3550,7 @@ function lsUpdateActiveNode(){
   lsGroup.remove(node.arrowHelper,node.sphereViz);
   node.arrowHelper.line.geometry.dispose(); node.arrowHelper.cone.geometry.dispose();
   node.sphereViz.geometry.dispose(); node.sphereViz.material.dispose();
-  node.arrowHelper=lsMakeArrow(node.pos,node.dir,node.radius,col); lsGroup.add(node.arrowHelper);
+  node.arrowHelper=lsMakeArrow(node.pos,node.dir,node.intensity,col); lsGroup.add(node.arrowHelper);
   node.sphereViz=lsMakeSphere(node.pos,node.radius,col);           lsGroup.add(node.sphereViz);
 
   lsSyncTwins(); lsSyncNodeList(); lsPreviewUpdate();
@@ -3364,7 +3582,7 @@ function lsOnGizmoChange(){
   // sync direction (rotate mode changes the pivot quaternion)
   const dir=new THREE.Vector3(0,0,1).applyQuaternion(node.pivot.quaternion).normalize();
   node.dir=dir;
-  node.arrowHelper.setDirection(dir);
+  node.arrowHelper.setDirection(lsArrowDir(dir,node.intensity));
   lsSyncTwins(); lsPreviewUpdate();
 }
 
@@ -3746,7 +3964,7 @@ function decoFuse(){
   S.meshDirty=true;
   if(S.colorCode===DEFAULT_COLOR_CODE) setColorCode(DECO_COLOR_CODE);
   if(pivotGizmo) buildGizmos();
-  setAnchorRanges(); updateExportLabel();
+  updateExportLabel();
   updateExportEstimate();
   history.clear();
   decoSyncVisibility();
@@ -3769,7 +3987,7 @@ function decoUnfuse(){
   d.preFuseColor=null; d.fused=false;
   S.meshDirty=true;
   if(pivotGizmo) buildGizmos();
-  setAnchorRanges(); updateExportLabel();
+  updateExportLabel();
   updateExportEstimate();
   UI.decoFuseOut='';
   history.clear();
@@ -3850,8 +4068,9 @@ function showStepView(id){
   if(wasLS     && id!=='lsculpt') lsExit();
   if(wasDeco   && id!=='deco') decoExit();      // leaving with a placed object fuses it into the link
   if(id!=='s1') clearCutPreview();              // the flatten-bottom plane belongs to the Part page only
-  else if(UI && UI.cutFold && !UI.cutPreview) startCutPreview(false);   // … and is back when the page is, if its section is open
+  else if(UI && UI.cutFold && !UI.cutPreview) startCutPreview();   // … and is back when the page is, if its section is open
   else if(UI) updateCutPreview();               // a cut in use shows on the Part page
+  updateMirrorViz();                            // … and so does a half part's mirror plane
   if(id==='sculpt'  && !sculpt.active && S.baseGeo) enterSculpt();
   if(id==='height'  && !disp.active  && S.baseGeo) enterHeight();
   if(id==='lsculpt' && S.baseGeo) lsEnter();
@@ -3889,6 +4108,7 @@ const ARM_HINTS={
   pickFace :'Click the face of the part that should rest on the plate',
   pickLink :'Click the link you want to swap',
   lsPick   :'Click a point on the part',
+  cutPick  :'Click the part where it should be cut',
 };
 function setArm(mode){ if(!UI)return; UI.arm = (UI.arm===mode)?null:mode; }
 
@@ -3942,6 +4162,11 @@ renderer.domElement.addEventListener('pointerdown',ev=>{
     else status('That click missed the part — click directly on the face that should rest on the plate.','warn');
     return;
   }
+  if(UI.arm==='cutPick'){                        // the flatten plane goes through the clicked point
+    if(hit){ cutThrough(hit.point); setArm(null); }
+    else status('That click missed the part — click the part where it should be cut.','warn');
+    return;
+  }
   if(UI.arm==='lsPick'){
     if(hit){
       const {face}=hit, posAttr=S.baseGeo.getAttribute('position');
@@ -3957,8 +4182,9 @@ renderer.domElement.addEventListener('pointerdown',ev=>{
   }
 });
 
-/* ---- drag the pivot marker directly on the plate (step 2, while its controls are open) ---- */
-let dragPivot=false;
+/* ---- drag the pivot marker over the plate (step 2, while its controls are open) — like every handle: Shift for
+        whole millimetres, Ctrl for fine adjustment ---- */
+let dragPivot=null, pivotHover=false;
 const _platePlane=new THREE.Plane(new THREE.Vector3(0,0,1),0), _plateHit=new THREE.Vector3();
 function gizmoUnder(ev){
   if(!pivotGizmo||!pivotGizmo.visible) return null;
@@ -3973,25 +4199,35 @@ function plateUnder(ev){
   return _plateHit;
 }
 wrap.addEventListener('pointerdown',ev=>{
-  if(!UI||UI.arm||ev.button!==0) return;
-  if(!gizmoUnder(ev)) return;
-  dragPivot=true;
+  if(!UI||UI.arm||ev.button!==0||ev.viewGrabbed) return;
+  const hit=gizmoUnder(ev);
+  if(!hit) return;
+  _platePlane.constant=-hit.point.z;                         // level with where the marker was taken hold of: that spot stays under the pointer
+  const pt=plateUnder(ev);
+  dragPivot={last:pt&&pt.clone(), x:UI.pin.x, y:UI.pin.y};
+  ev.viewGrabbed=true;
   controls.enabled=false;
   renderer.domElement.style.cursor='grabbing';
   ev.stopPropagation(); ev.preventDefault();
 },true);
 window.addEventListener('pointermove',ev=>{
-  if(!dragPivot){
-    if(UI&&!UI.arm){ const h=gizmoUnder(ev); if(pivotGizmo&&pivotGizmo.visible) renderer.domElement.style.cursor=h?'grab':''; }
+  const d=dragPivot;
+  if(!d){
+    const h=!!(UI&&!UI.arm&&gizmoUnder(ev));
+    if(h!==pivotHover){ pivotHover=h; renderer.domElement.style.cursor=h?'grab':''; }
     return;
   }
   const pt=plateUnder(ev); if(!pt) return;
-  setPivot('x',+pt.x.toFixed(2)); setPivot('y',+pt.y.toFixed(2));
+  const fine=ev.ctrlKey||ev.metaKey;
+  if(d.last){ d.x+=(pt.x-d.last.x)*(fine?0.1:1); d.y+=(pt.y-d.last.y)*(fine?0.1:1); }
+  d.last=pt.clone();
+  const st=ev.shiftKey ? 1 : viewStep(new THREE.Vector3(d.x,d.y,0), fine);
+  setPivot('x',snapTo(d.x,st)); setPivot('y',snapTo(d.y,st));
   syncGizmos();
 });
 window.addEventListener('pointerup',()=>{
   if(!dragPivot) return;
-  dragPivot=false; controls.enabled=true; renderer.domElement.style.cursor='';
+  dragPivot=null; controls.enabled=true; renderer.domElement.style.cursor=pivotHover?'grab':'';
 });
 
 /* ---- side panel resize ---- */
@@ -4026,6 +4262,60 @@ window.addEventListener('pointerup',()=>{
   });
 })();
 
+/* ---- x-jog="model": a length in the side panel, set by dragging ----
+   A strip of ruler that is dragged sideways. It has no ends and no fixed range of millimetres: how far a drag goes
+   follows the size of the part (the strip's own width is roughly half the part; data-gain scales that), and the value
+   lands on round steps that suit that speed. The keys are those of the handles in the view: Shift for whole
+   millimetres (and ten times as far), Ctrl for fine adjustment (a tenth as far, in a tenth of the step). A click left
+   or right of the middle is one step, and so are the arrow keys. data-min / data-max keep a value where it makes sense. */
+function jogDirective(el, {expression}, {evaluateLater, effect, cleanup}){
+  const read=evaluateLater(expression), write=evaluateLater(`${expression} = __jog`);
+  const lim=k=>{ const v=parseFloat(el.dataset[k]); return Number.isFinite(v) ? v : (k==='min' ? -Infinity : Infinity); };
+  const clamp=v=>Math.min(lim('max'), Math.max(lim('min'), v));
+  const rate=()=>Math.max(0.002, (UI ? UI.partSize : 40)/400*(parseFloat(el.dataset.gain)||1));     // mm per pixel
+  const fineKey=ev=>ev.ctrlKey||ev.metaKey;
+  const stepFor=ev=> ev.shiftKey ? 1 : niceStep(rate()*(fineKey(ev) ? 0.1 : 1));
+  let value=0, drag=null;
+  const set=v=>{ v=+clamp(v).toFixed(3); if(v!==value) write(()=>{}, {scope:{__jog:v}}); };
+  el.classList.add('jog'); el.tabIndex=0; el.setAttribute('role','slider');
+  el.title='Drag sideways to change · Shift: whole mm · Ctrl: fine';
+  effect(()=>read(v=>{                                     // the ruler moves with the value
+    value=+v||0;
+    el.style.setProperty('--jog', (((value/rate())%40)+40)%40+'px');
+    el.setAttribute('aria-valuenow', value);
+  }));
+  const down=ev=>{
+    if(ev.button!==0) return;
+    el.setPointerCapture(ev.pointerId); el.classList.add('dragging'); el.focus();
+    drag={x:ev.clientX, x0:ev.clientX, acc:value, moved:false};
+    ev.preventDefault();
+  };
+  const move=ev=>{
+    if(!drag) return;
+    const dx=ev.clientX-drag.x; drag.x=ev.clientX;
+    if(Math.abs(ev.clientX-drag.x0)>2) drag.moved=true;
+    if(!drag.moved) return;
+    drag.acc=clamp(drag.acc+dx*rate()*(ev.shiftKey ? 10 : 1)*(fineKey(ev) ? 0.1 : 1));   // step by step: a fine stretch counts for less without a jump
+    set(snapTo(drag.acc, stepFor(ev)));
+  };
+  const up=ev=>{
+    if(!drag) return;
+    const d=drag; drag=null; el.classList.remove('dragging');
+    if(d.moved || ev.type!=='pointerup') return;
+    const r=el.getBoundingClientRect(), st=stepFor(ev);    // a click: one step, down on the left and up on the right
+    set(snapTo(value+(ev.clientX<r.left+r.width/2 ? -st : st), st));
+  };
+  const key=ev=>{
+    const dir={ArrowLeft:-1, ArrowDown:-1, ArrowRight:1, ArrowUp:1}[ev.key];
+    if(!dir) return;
+    ev.preventDefault();
+    const st=stepFor(ev); set(snapTo(value+dir*st, st));
+  };
+  const on=[['pointerdown',down],['pointermove',move],['pointerup',up],['pointercancel',up],['keydown',key]];
+  for(const [t,f] of on) el.addEventListener(t,f);
+  cleanup(()=>{ for(const [t,f] of on) el.removeEventListener(t,f); });
+}
+
 /* ======================================================================== *
  *  ALPINE COMPONENT — all reactive UI state + the template entry points
  * ======================================================================== */
@@ -4047,13 +4337,15 @@ function chainApp(){
     chipMesh:'', chipSize:'', chipCollide:'',
     /* ----- step 1 ----- */
     hasPart:false, partName:'', partHasColor:false, halfDetected:false,
-    partSize:40,                       // the part's longest side (mm) — scales the brush / morph sliders
+    partSize:40,                       // the part's longest side (mm) — how far a drag on a length in the side panel goes (see x-jog)
     unitScale:1, colorShades:2, purify:false, partX:0, partY:0, partZ:0,
     symOut:'',
     dbgOut:'Load a part to see its vertex / triangle count.',
     showVerts:false, showWire:false,
-    cutHeight:0, cutMin:0, cutMax:20, cutPreview:false, cutFold:false,
-    cutOn:false, cutAt:0,              // a cut is in use: the links of the chain lose everything below cutAt (the part does not)
+    cutDepth:0, cutTiltX:0, cutTiltY:0,   // the flatten plane as it is being set: mm above the part's lowest point, and its tilt (°, about X / Y)
+    cutSpan:20, cutPreview:false, cutFold:false,
+    cutOn:false, cutUp:0,              // a cut is in use: the links of the chain lose their lowest cutUp mm (the part does not)
+    mirrorFold:false,
     s1nextDisabled:true,
     /* ----- sculpt (optional step) ----- */
     sculptTool:'draw', sculptRadius:8, sculptStrength:0.5,
@@ -4076,8 +4368,7 @@ function chainApp(){
     canUndo:false, canRedo:false,
     /* ----- step 2 ----- */
     pin:{x:0,y:0,z:0}, hole:{x:0,y:0,z:0},             // stored joint — edited through offX… / pivX… below
-    anchorXmin:-100, anchorXmax:100, anchorYmin:-100, anchorYmax:100,
-    offXmax:50, offYmax:50, offZmax:20, pivotOpen:false,
+    pivotOpen:false,
     mateOut:'', mateState:'', matePreviewOn:true, anchorWarn:'', s2nextDisabled:true,
     /* ----- step 3 ----- */
     chainLenVal:'—', chainLenSub:'',
@@ -4148,12 +4439,9 @@ function chainApp(){
       this.$watch('previewReduce', previewSet);
       this.$watch('previewMaxVerts', previewSet);
       this.$watch('sectionZ', ()=>updateSectionPlane());
-      this.$watch('cutHeight', v=>{              // moving the slider shows the cut plane — no separate "preview" toggle
-        if(v>this.cutMin && S.baseGeo && S.uiStep==='s1') this.cutPreview=true; else if(!(v>this.cutMin)) clearCutPreview();
-        updateCutPreview();
-      });
+      for(const k of ['cutDepth','cutTiltX','cutTiltY']) this.$watch(k, ()=>cutPreviewSoon());
       this.$watch('sculptTool',     v=>sculpt.brush.type=v);
-      this.$watch('sculptRadius',   v=>sculpt.brush.radius=v);
+      this.$watch('sculptRadius',   v=>{ sculpt.brush.radius=v; sculpt._cursor.scale.setScalar(v); });   // the ring in the view is the brush
       this.$watch('sculptStrength', v=>sculpt.brush.strength=v);
       this.$watch('sculptMirror',   ()=>applySculptMirror());
       this.$watch('sculptManual',   ()=>{ applySculptMirror(); lsPlaneChanged(); });
@@ -4161,7 +4449,7 @@ function chainApp(){
       this.$watch('sculptOffset',   ()=>{ applySculptMirror(); lsPlaneChanged(); });
 
       // heightmap displacement bridges
-      this.$watch('hmRadius',   v=>disp.brush.radius=v);
+      this.$watch('hmRadius',   v=>{ disp.brush.radius=v; disp._cursor.scale.setScalar(v); });
       this.$watch('hmFlow',     v=>disp.brush.strength=v);
       this.$watch('hmErase',    v=>disp.erase=v);
       this.$watch('hmStrength', v=>disp.setStrength(v));
@@ -4175,9 +4463,9 @@ function chainApp(){
         this.$watch(k, hmReproc);
 
       // mirror half
-      this.$watch('mirrorEnabled', ()=>{ lsPlaneChanged(); if(S.poses.length) regen(); });
-      this.$watch('mirrorAxis',    ()=>{ if(UI.mirrorEnabled){ lsPlaneChanged(); if(S.poses.length) regen(); } });
-      this.$watch('mirrorOffset',  ()=>{ if(UI.mirrorEnabled){ lsPlaneChanged(); debounceMirrorRegen(); } });
+      this.$watch('mirrorEnabled', ()=>{ updateMirrorViz(); lsPlaneChanged(); if(S.poses.length) regen(); });
+      this.$watch('mirrorAxis',    ()=>{ if(UI.mirrorEnabled){ updateMirrorViz(); lsPlaneChanged(); if(S.poses.length) regen(); } });
+      this.$watch('mirrorOffset',  ()=>{ if(UI.mirrorEnabled){ updateMirrorViz(); lsPlaneChanged(); debounceMirrorRegen(); } });
 
       // loop sculpt bridges
       this.$watch('lsIntensity', ()=>lsUpdateActiveNode());
@@ -4251,11 +4539,17 @@ function chainApp(){
     closeTool(){ const back=this.toolBack||'s1'; this.toolBack='s1'; this.goStep(back); },
     onEscape(){ if(this.projOpen) this.projOpen=false; else if(this.arm) setArm(null); },
     get armHint(){ return ARM_HINTS[this.arm] || ''; },
+    /* a page with handles in the view (arrows, rings, dots) */
+    get hasHandles(){
+      const id=this.openId;
+      return id==='s2' || id==='deco' || (id==='lsculpt' && this.lsActiveNode>=0) || (id==='s3' && this.shape==='spiral')
+        || (id==='s1' && (this.cutPreview || (this.mirrorFold && this.mirrorEnabled)));
+    },
     get mouseHint(){
       return (this.openId==='sculpt'||this.openId==='height')
-        ? 'Drag: paint · Alt+drag: rotate · Right-drag: move · Scroll: zoom'
-        : this.openId==='s2'
-        ? 'Drag an arrow: move the next link · Drag: rotate · Right-drag: move · Scroll: zoom'
+        ? 'Drag: paint · Shift+scroll: brush size · Alt+drag: rotate · Right-drag: move · Scroll: zoom'
+        : this.hasHandles
+        ? 'Drag a handle to change it · Shift: whole steps · Ctrl: fine\nDrag: rotate · Right-drag: move · Scroll: zoom'
         : 'Drag: rotate · Right-drag: move · Scroll: zoom';
     },
     /* everything that has to be true of the part before any later page works on it (safe to repeat) */
@@ -4263,7 +4557,7 @@ function chainApp(){
       if(!S.baseGeo) return false;
       if(!anchorsValid()) stackLinks();                // no offset yet → the pivot follows the part as it is now
       markDone('s1'); unlock('s2');
-      buildGizmos(); setAnchorRanges();
+      buildGizmos();
       return true;
     },
     async s1Next(){
@@ -4289,8 +4583,6 @@ function chainApp(){
     /* ---- step 1 actions ---- */
     chooseFile(){ $('fileInput').click(); },
     onFileInput(e){ if(e.target.files[0])loadFile(e.target.files[0]); e.target.value=''; },   // reset → the same file can be picked again
-    get brushMax(){ return Math.max(5, Math.ceil(this.partSize*0.75)); },
-    get reachMax(){ return Math.max(5, Math.ceil(this.partSize*1.5)); },
     autoAlign, nudge, setArm, layFlat, detectSymmetry, centerPart,
     alignZ(){ alignInPlane(); S.partX=0; this.partX=0; S.partY=0; this.partY=0; S.partZ=0; this.partZ=0; frameCamera(); status('Auto-rotated: longest axis on X.','ok'); },
     resetRotXY(){ rotatePartX(0); this.partX=0; rotatePartY(0); this.partY=0; },
@@ -4304,17 +4596,28 @@ function chainApp(){
       return all>n ? `The chain has ${all} colours — similar ones are merged into these ${n}:` : `The chain has ${n} colour${n>1?'s':''}:`;
     },
     get exportMixOn(){ return this.exportMix && this.exportFmtNow==='3mf' && this.chainColoured; },
-    onCutFold(open){ this.cutFold=open; if(open) startCutPreview(true); else clearCutPreview(); },
-    get cutInfo(){ const off=this.cutHeight-this.cutMin, all=this.cutMax-this.cutMin; return `Cuts off the lowest ${off.toFixed(1)} mm of ${all.toFixed(1)} mm — ${Math.round(100*off/all)} % of the height.`; },
-    get cutSummary(){ return this.cutOn ? `links cut ${(this.cutAt-this.cutMin).toFixed(1)} mm up` : ''; },
+    onCutFold(open){ this.cutFold=open; if(open) startCutPreview(); else clearCutPreview(); },
+    onMirrorFold(open){ this.mirrorFold=open; updateMirrorViz(); },
+    cutLevel(){ this.cutTiltX=0; this.cutTiltY=0; },
+    get cutTilted(){ return !!((+this.cutTiltX||0) || (+this.cutTiltY||0)); },
+    get cutInfo(){
+      const off=Math.min(+this.cutDepth||0, this.cutSpan), all=this.cutSpan||1;
+      return `Cuts off the lowest ${fmtLen(off)} mm of ${all.toFixed(1)} mm — ${Math.round(100*off/all)} %`
+        + (this.cutTilted ? ', along the tilted plane. Used, the part is turned so that this plane lies on the plate.' : ' of the height.');
+    },
+    get cutSummary(){ return this.cutOn ? `links cut ${fmtLen(this.cutUp)} mm up` : ''; },
 
     /* ---- loop sculpt actions ---- */
     mirrorSnap(){
       if(!S.baseGeo) return;
       S.baseGeo.computeBoundingBox();
-      const bb=S.baseGeo.boundingBox, ax=this.mirrorAxis;
-      const mn=bb.min[ax], mx=bb.max[ax];
-      this.mirrorOffset=+(Math.abs(mn)<=Math.abs(mx)?mn:mx).toFixed(3);
+      const bb=S.baseGeo.boundingBox, ax=this.mirrorAxis, i=['x','y','z'].indexOf(ax), pos=S.baseGeo.attributes.position;
+      const mn=bb.min[ax], mx=bb.max[ax], eps=(mx-mn)*0.015;
+      let atMin=0, atMax=0;
+      for(let k=0;k<pos.count;k++){ const v=pos.getComponent(k,i); if(v-mn<eps) atMin++; if(mx-v<eps) atMax++; }
+      // the cut face is the flat end of the part — the one most vertices lie on; two ends alike: the one nearer to the plane
+      const flat=Math.abs(atMin-atMax) > 0.02*pos.count, near=Math.abs(this.mirrorOffset-mn)<=Math.abs(this.mirrorOffset-mx);
+      this.mirrorOffset=+((flat ? atMin>atMax : near) ? mn : mx).toFixed(3);
     },
     lsPickMode(){ setArm(this.arm==='lsPick'?null:'lsPick'); },
     lsSelectNode(idx){ lsSelectNode(idx); },

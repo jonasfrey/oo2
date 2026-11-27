@@ -10,18 +10,29 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
 1. **Part** — load one link, lay it flat ("Pick the bottom face" = one click on the part).
    everything else (fine rotation, flatten bottom, symmetry / half part, colours, file units) is folded away.
    the part is never reduced: it keeps every vertex of the file you loaded (see "detail" below).
-   **Flatten the bottom**: the cut plane starts through the middle of the part; drag its arrow up or down in the view (or use
-   the slider). what would be cut off is shown in red, the edge of the new bottom as a bright line. "Use this cut" stores the
-   height as a setting: the part itself stays whole (in the tools and in the saved project) — the links are cut when the chain
-   is built, and set down flat on the plate.
+   **Flatten the bottom**: the cut plane belongs to the part and is set on the part, in the view — its arrow pushes it
+   through the part, its two rings tilt it, "Click the part where to cut" puts it through a point. it starts a little above
+   the bottom. what would be cut off is shown in red, the edge of the new bottom as a bright line. the plane is measured from
+   the part too: "cut off 1.4 mm" is 1.4 mm above the part's lowest point (seen along the plane), so it stays where it is on
+   the part when the part is moved or turned on the plate. "Use this cut" stores that one number (`cutUp`): the part itself
+   stays whole (in the tools and in the saved project) — the links are cut when the chain is built, and set down flat on the
+   plate. a tilted plane becomes the bottom: when it is used, the part is turned until the plane is level (then look at the
+   Joints page again). older projects stored the height on the plate (`cut`); they open as before.
+   **Half a part**: while "Symmetry & mirroring" is open, the mirror plane is in the view with the other half as a ghost; its
+   arrow moves it. the plane goes along when the part is moved or given a quarter turn.
    the optional extras live here too: Sculpt, Relief from an image, Morph along the chain, Add an object.
-   a morph point has one handle for everything: arrows move it, rings turn its arrow, the ball in the middle moves it freely.
-   its amount slider goes from 0 to 200 mm (the number field also takes a negative amount).
+   the brush of Sculpt / Relief is the ring in the view: Shift + scroll (or `[` `]`) resizes it there.
+   a morph point is set entirely in the view: arrows move it, rings turn its arrow, the ball in the middle moves it freely;
+   the yellow dot at the tip of its arrow is the amount (the arrow is as long as the surface moves on the last link — as far
+   as you pull it; a negative amount is typed), the light-blue dot on its sphere the reach. the points go along when the part
+   is turned.
    a morph point can be **mirrored** ("Mirror to the other side"): it then acts a second time across the part's mirror plane —
    the detected symmetry line (found on the first tick), or a plane set by hand; on a half part its own mirror plane.
-2. **Joints** — the next link starts exactly on top of the part; move it along X / Y (arrows in the view, or the sliders)
-   until the fit check says the two no longer touch. height step and pivot point are folded away.
+2. **Joints** — the next link starts exactly on top of the part; move it along X / Y (arrows in the view, or the strips in
+   the panel) until the fit check says the two no longer touch. height step and pivot point are folded away; while they are
+   open the next link has a third arrow for the height, and the red pivot marker can be dragged over the plate.
 3. **Chain** — shape + number of links, with a status card (length, overlaps, plate fit).
+   a spiral's start radius and loop spacing are two dots in the view, on a line from its middle (blue, green): pull them.
    overlapping links turn red, and the view shows where: a yellow line along which the two surfaces cross and a ring around
    every such place; "Show where" goes from one to the next. the Joints page shows the same for the part and its neighbour.
    **⇄ Reverse** builds the chain the other way round: same path, every link turned half a turn (also on the Export page).
@@ -46,6 +57,18 @@ four steps, shown in the bar at the top of the side panel; each page has one mai
    change them). see `slicer/OrcaProject.js` for the file format.
 
 projects (open / save / delete, project file .json) are behind the **Projects** / **Save** buttons in the header.
+
+**lengths** — nothing is set with a slider that has a fixed range of millimetres: a part may be 15 mm or 150.
+- whatever is a place or a length on the part has a **handle in the view**: the gizmo's arrows and rings (flatten plane,
+  mirror plane, next link, morph point, added object) and round dots for a single length (morph amount and reach, spiral
+  radius and spacing). `deco/TransformGizmo.js`, `PullDots.js`.
+- all handles take the same two keys: **Ctrl** = fine adjustment, the drag counts a tenth · **Shift** = whole steps
+  (1 mm, 15° — 5° for the flatten plane). what is dragged lands on round numbers, as fine as the zoom shows: about one screen
+  pixel, so zooming in gives finer steps (never finer than 0.01 mm).
+- in the side panel every length is a number field with a **strip of ruler** next to it (`x-jog` in `app.js`): drag it
+  sideways. it has no ends; how far a drag goes follows the size of the part (the strip's width ≈ half the part), with the
+  same keys — Ctrl fine, Shift whole millimetres and ten times as far. a click left / right of the middle, or the arrow
+  keys, is one step. sliders are left only where the range is the same for every part: angles, 0 – 1 strengths, counts.
 
 **detail** — there are three levels, and only the first one is ever saved:
 - the **part** keeps every vertex. the part tools work on it, the overlap check tests it, the file is made from it.

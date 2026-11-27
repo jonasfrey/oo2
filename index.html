@@ -113,20 +113,29 @@
           <details class="fold" @toggle="onCutFold($event.target.open)">
             <summary>Flatten the bottom <span class="sum" x-text="cutSummary"></span></summary>
             <div class="foldbody">
-              <p class="hint">Rounded feet or a stray bump underneath? Slice the links off at a height, so they really sit flat. <b>Drag the blue arrow</b> in the view, or use the slider: everything shown in <span style="color:#ff6b6b">red</span> is cut away, the bright line is the edge of the new bottom.</p>
-              <div class="srow"><label>Cut height (mm)</label><input x-model.number="cutHeight" type="range" :min="cutMin" :max="cutMax" step="0.1"><input x-model.number="cutHeight" type="number" step="0.1" :min="cutMin" :max="cutMax"></div>
-              <p class="hint" x-show="cutPreview" x-text="cutInfo"></p>
+              <p class="hint">Rounded feet or a stray bump underneath? Cut the links off along a plane, so they really sit flat. The plane is set on the part, in the view: drag its <b style="color:#6fa4ff">arrow</b> to move it, its <b>rings</b> to tilt it. Everything shown in <span style="color:#ff6b6b">red</span> is cut away; the bright line is the edge of the new bottom.</p>
               <div class="btnrow">
-                <button class="sm" @click="applyCut()" :disabled="!cutPreview || !(cutHeight>cutMin && cutHeight<cutMax) || (cutOn && cutAt===cutHeight)" x-text="cutOn ? 'Move the cut here' : 'Use this cut'">Use this cut</button>
+                <button class="ghost sm" :class="{ on: arm==='cutPick' }" @click="setArm('cutPick')" :disabled="!cutPreview"
+                  x-text="arm==='cutPick' ? 'Now click the part…' : 'Click the part where to cut'">Click the part where to cut</button>
+                <button class="ghost sm" @click="cutLevel()" :disabled="!cutTilted" title="Take the tilt out: the plane lies parallel to the plate again">Level the plane</button>
+              </div>
+              <div class="srow"><label title="Measured from the part's lowest point">Cut off (mm)</label><div x-jog="cutDepth" data-min="0" :data-max="cutSpan" data-gain="0.5"></div><input x-model.number="cutDepth" type="number" step="0.05" min="0"></div>
+              <div class="row"><label>Tilt (°)</label>
+                <span class="unit" style="color:#ff6b78" title="About X — the red ring">X</span><input x-model.number="cutTiltX" type="number" step="0.1" min="-60" max="60">
+                <span class="unit" style="color:#6ee05a" title="About Y — the green ring">Y</span><input x-model.number="cutTiltY" type="number" step="0.1" min="-60" max="60"></div>
+              <p class="hint" x-show="cutPreview" x-text="cutInfo"></p>
+              <p class="hint">For fine adjustment hold <kbd>Ctrl</kbd> while you drag, in the view or here: the drag then counts a tenth. <kbd>Shift</kbd> goes in whole millimetres and 5° steps.</p>
+              <div class="btnrow">
+                <button class="sm" @click="applyCut()" :disabled="!cutPreview || !(cutDepth>0 && cutDepth<cutSpan) || (cutOn && cutUp===cutDepth && !cutTilted)" x-text="cutOn ? 'Move the cut here' : 'Use this cut'">Use this cut</button>
                 <button class="ghost sm" @click="removeCut()" :disabled="!cutOn">Remove the cut</button>
               </div>
-              <p class="verdict ok" x-show="cutOn">✓ The links are cut <span x-text="(cutAt-cutMin).toFixed(1)"></span> mm above the bottom.</p>
-              <p class="hint">The part itself is not changed — here, in the tools and in the saved project it stays whole. The cut is made when the chain is built.</p>
+              <p class="verdict ok" x-show="cutOn">✓ The links are cut <span x-text="(+cutUp.toFixed(2))"></span> mm above their lowest point.</p>
+              <p class="hint">The part itself is not cut — here, in the tools and in the saved project it stays whole; the links are cut when the chain is built.</p>
             </div>
           </details>
 
 
-          <details class="fold">
+          <details class="fold" @toggle="onMirrorFold($event.target.open)">
             <summary>Symmetry &amp; mirroring <span class="sum" x-text="mirrorEnabled ? 'half part · mirrored' : (halfDetected ? 'half a part?' : '')"></span></summary>
             <div class="foldbody">
               <h4>Mirror lines</h4>
@@ -146,9 +155,10 @@
                     <button :class="{on:mirrorAxis==='y'}" @click="mirrorAxis='y'">Y</button>
                     <button :class="{on:mirrorAxis==='z'}" @click="mirrorAxis='z'">Z</button>
                   </div></div>
-                <div class="srow"><label>Plane position (mm)</label><input x-model.number="mirrorOffset" type="range" min="-500" max="500" step="0.1"><input x-model.number="mirrorOffset" type="number" step="0.1"></div>
+                <p class="hint">The <span style="color:#ff3df0">plane</span> and the other half are shown in the view: drag the arrow to move the plane until the two halves meet.</p>
+                <div class="srow"><label>Plane position (mm)</label><div x-jog="mirrorOffset"></div><input x-model.number="mirrorOffset" type="number" step="0.1"></div>
                 <div class="btnrow"><button class="ghost sm" @click="mirrorSnap()">Snap to the cut face</button></div>
-                <p class="hint">The chain and the export use the full, mirrored link. Here you keep seeing the half, which is easier to edit.</p>
+                <p class="hint">The chain and the export use the full, mirrored link. The tools keep working on the half, which is easier to edit.</p>
               </div>
             </div>
           </details>
@@ -198,7 +208,8 @@
             <button :class="{ on: sculptTool==='carve' }"  @click="setSculptTool('carve')">Carve</button>
             <button :class="{ on: sculptTool==='smooth' }" @click="setSculptTool('smooth')">Smooth</button>
           </div></div>
-        <div class="srow"><label>Size (mm)</label><input x-model.number="sculptRadius" type="range" min="0.5" :max="brushMax" step="0.5"><input x-model.number="sculptRadius" type="number" step="0.5" min="0.2"></div>
+        <div class="srow"><label>Size (mm)</label><div x-jog="sculptRadius" data-min="0.2" data-gain="0.5"></div><input x-model.number="sculptRadius" type="number" step="0.5" min="0.2"></div>
+        <p class="hint">The ring in the view is the brush. Resize it there: hold <kbd>Shift</kbd> and scroll, or press <kbd>[</kbd> / <kbd>]</kbd>.</p>
         <div class="srow"><label>Strength</label><input x-model.number="sculptStrength" type="range" min="0" max="1" step="0.01"><input x-model.number="sculptStrength" type="number" step="0.05" min="0" max="1"></div>
         <label class="check"><input type="checkbox" x-model="sculptMirror"> <span>Mirror every stroke to the other side</span></label>
         <div class="btnrow undo">
@@ -244,8 +255,9 @@
         <input x-ref="hmFile" type="file" accept="image/*" hidden @change="hmLoadFile($event)">
         <canvas id="hmPreview" x-show="hmLoaded"></canvas>
 
-        <div class="srow"><label>Depth (mm)</label><input x-model.number="hmStrength" type="range" min="0" max="30" step="0.1"><input x-model.number="hmStrength" type="number" step="0.1"></div>
-        <div class="srow"><label>Brush size (mm)</label><input x-model.number="hmRadius" type="range" min="0.5" :max="brushMax" step="0.5"><input x-model.number="hmRadius" type="number" step="0.5" min="0.2"></div>
+        <div class="srow"><label>Depth (mm)</label><div x-jog="hmStrength" data-min="0" data-gain="0.25"></div><input x-model.number="hmStrength" type="number" step="0.1" min="0"></div>
+        <div class="srow"><label>Brush size (mm)</label><div x-jog="hmRadius" data-min="0.2" data-gain="0.5"></div><input x-model.number="hmRadius" type="number" step="0.5" min="0.2"></div>
+        <p class="hint">The ring in the view is the brush. Resize it there: hold <kbd>Shift</kbd> and scroll, or press <kbd>[</kbd> / <kbd>]</kbd>.</p>
         <div class="srow"><label>Brush flow</label><input x-model.number="hmFlow" type="range" min="0" max="1" step="0.01"><input x-model.number="hmFlow" type="number" step="0.05" min="0" max="1"></div>
         <label class="check"><input type="checkbox" x-model="hmErase"> <span>Eraser — remove relief instead of adding it</span></label>
         <div class="btnrow undo">
@@ -318,11 +330,12 @@
               <button :class="{ on: lsMode==='pinch' }"   @click="lsMode='pinch'">Pinch</button>
             </div></div>
           <p class="hint" x-show="lsMode==='push'">Moves the surface along the arrow.</p>
-          <p class="hint" x-show="lsMode==='inflate'">Swells the surface outwards (type a negative amount to hollow it).</p>
+          <p class="hint" x-show="lsMode==='inflate'">Swells the surface outwards (a negative amount hollows it).</p>
           <p class="hint" x-show="lsMode==='pinch'">Pulls the surface towards the point.</p>
-          <div class="srow"><label>Amount (mm)</label><input x-model.number="lsIntensity" type="range" min="0" max="200" step="0.5"><input x-model.number="lsIntensity" type="number" step="0.5" min="-200" max="200"></div>
-          <div class="srow"><label>Reach (mm)</label><input x-model.number="lsRadius" type="range" min="1" :max="reachMax" step="1"><input x-model.number="lsRadius" type="number" step="1" min="0.5"></div>
-          <p class="hint">Drag the handles on the point in the view: the <b>arrows</b> move it, the <b>rings</b> turn its arrow, the <b>ball</b> moves it freely. Hold <kbd>Shift</kbd> to snap.</p>
+          <div class="srow"><label>Amount (mm)</label><div x-jog="lsIntensity"></div><input x-model.number="lsIntensity" type="number" step="0.5"></div>
+          <div class="srow"><label>Reach (mm)</label><div x-jog="lsRadius" data-min="0.5"></div><input x-model.number="lsRadius" type="number" step="0.5" min="0.5"></div>
+          <p class="hint">All of it is set on the point, in the view. Pull the <b style="color:#ffcc00">yellow dot</b> at the tip of its arrow: the amount — the arrow is as long as the surface moves on the last link. Pull the <b style="color:#6fd6ff">light-blue dot</b> on its sphere: the reach. The <b>arrows</b> move the point, the <b>rings</b> turn its arrow, the <b>ball</b> moves it freely.</p>
+          <p class="hint">Hold <kbd>Ctrl</kbd> for fine adjustment (the drag counts a tenth), <kbd>Shift</kbd> to snap to whole steps.</p>
           <label class="check"><input type="checkbox" x-model="lsMirror"> <span>Mirror to the other side</span></label>
           <p class="hint" x-show="lsMirror">The point acts a second time, mirrored — the fainter arrow in the view. <span x-text="lsMirrorInfo"></span></p>
 
@@ -397,7 +410,7 @@
 
         <div class="card" x-show="decoLoaded && !decoFused">
           <h3>Place it</h3>
-          <p class="hint">Drag the handles in the view: <b>arrows</b> move, <b>rings</b> turn, <b>outer ring</b> resizes, <b>cubes</b> stretch. Hold <kbd>Shift</kbd> to snap.</p>
+          <p class="hint">Drag the handles in the view: <b>arrows</b> move, <b>rings</b> turn, <b>outer ring</b> resizes, <b>cubes</b> stretch. Hold <kbd>Shift</kbd> to snap, <kbd>Ctrl</kbd> for fine adjustment.</p>
           <div class="btnrow">
             <button class="ghost sm" @click="decoDrop()">Drop onto link</button>
             <button class="ghost sm" @click="decoCenter()">Centre over link</button>
@@ -490,20 +503,20 @@
             <h3><span class="swatch" style="background:var(--mate)"></span>Next link</h3>
             <button class="ghost sm" @click="resetOffset()" :disabled="!offX && !offY && !offZ" title="Put the next link back exactly on top of this one">Back to start</button>
           </div>
-          <div class="arow"><label>X</label><input x-model.number="offX" type="range" step="0.1" :min="-offXmax" :max="offXmax"><input x-model.number="offX" type="number" step="0.1"></div>
-          <div class="arow"><label>Y</label><input x-model.number="offY" type="range" step="0.1" :min="-offYmax" :max="offYmax"><input x-model.number="offY" type="number" step="0.1"></div>
-          <p class="hint">How far the next link is moved, in mm — 0 / 0 is exactly on top of this one. You can also drag the arrows in the view.</p>
+          <div class="arow"><label>X</label><div x-jog="offX"></div><input x-model.number="offX" type="number" step="0.1"></div>
+          <div class="arow"><label>Y</label><div x-jog="offY"></div><input x-model.number="offY" type="number" step="0.1"></div>
+          <p class="hint">Drag the arrows on the next link in the view — or the strips here. For the last tenths hold <kbd>Ctrl</kbd>: the drag then counts a tenth. The numbers are how far the next link is moved, in mm; 0 / 0 is exactly on top of this one.</p>
         </div>
 
         <details class="fold" @toggle="pivotOpen=$el.open">
           <summary>Height step and pivot</summary>
           <div class="foldbody">
             <h4>Height step</h4>
-            <div class="arow"><label>Z</label><input x-model.number="offZ" type="range" step="0.1" :min="-offZmax" :max="offZmax"><input x-model.number="offZ" type="number" step="0.1"></div>
-            <p class="hint">Lifts every link above the one before, so the chain climbs like a ladder. Leave it at 0 for a flat chain.</p>
+            <div class="arow"><label>Z</label><div x-jog="offZ"></div><input x-model.number="offZ" type="number" step="0.1"></div>
+            <p class="hint">Lifts every link above the one before, so the chain climbs like a ladder. Leave it at 0 for a flat chain. While this section is open the next link has a third, blue arrow for it.</p>
             <h4><span class="swatch" style="background:var(--pin)"></span>Pivot</h4>
-            <div class="arow"><label>X</label><input x-model.number="pivX" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"><input x-model.number="pivX" type="number" step="0.1"></div>
-            <div class="arow"><label>Y</label><input x-model.number="pivY" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"><input x-model.number="pivY" type="number" step="0.1"></div>
+            <div class="arow"><label>X</label><div x-jog="pivX"></div><input x-model.number="pivX" type="number" step="0.1"></div>
+            <div class="arow"><label>Y</label><div x-jog="pivY"></div><input x-model.number="pivY" type="number" step="0.1"></div>
             <p class="hint">Only matters for a curved chain: there each link is turned a little against the one before, around this point. It starts halfway between the two links — if the links of a spiral collide, drag the red marker onto the real hinge.</p>
           </div>
         </details>
@@ -540,9 +553,9 @@
           <button class="ghost sm" @click="reverseChain()" title="Build the chain the other way round: every link is turned half a turn (180°), on the same path">⇄ Reverse</button></div>
         <div class="srow"><label>Links</label><input x-model.number="count" type="range" min="2" max="400"><input x-model.number="count" type="number" min="2" max="5000"></div>
         <div x-show="shape==='spiral'">
-          <div class="srow"><label>Start radius (mm)</label><input x-model.number="startR" type="range" min="0" max="150" step="1"><input x-model.number="startR" type="number" step="1"></div>
-          <div class="srow"><label>Loop spacing (mm)</label><input x-model.number="spacing" type="range" min="2" max="60" step="0.5"><input x-model.number="spacing" type="number" step="0.5"></div>
-          <p class="hint">Start radius is the size of the hole in the middle. Loop spacing is the distance from one turn to the next — keep it larger than the part is wide, or the turns collide.</p>
+          <div class="srow"><label><span class="swatch" style="background:#4cc2ff;border-radius:50%"></span>Start radius (mm)</label><div x-jog="startR" data-min="0" data-gain="2"></div><input x-model.number="startR" type="number" step="1" min="0"></div>
+          <div class="srow"><label><span class="swatch" style="background:#7ee787;border-radius:50%"></span>Loop spacing (mm)</label><div x-jog="spacing" data-min="0.5"></div><input x-model.number="spacing" type="number" step="0.5" min="0.5"></div>
+          <p class="hint">Both are dots in the view, on a line from the middle of the spiral: pull the <b style="color:#4cc2ff">blue</b> one to size the hole in the middle, the <b style="color:#7ee787">green</b> one to set the distance from one turn to the next — keep that larger than the part is wide, or the turns collide. <kbd>Ctrl</kbd> for fine adjustment, <kbd>Shift</kbd> for whole millimetres.</p>
         </div>
         <p class="hint" x-show="shape==='straight'">A straight chain along X. How far apart the links sit is what you set on the Joints page.</p>
 
@@ -551,12 +564,12 @@
           <div class="foldbody">
             <p class="hint">Nudge how the next link sits against the one before and watch the whole chain re-lay itself — until no link is red.</p>
             <h4>Next link</h4>
-            <div class="arow"><label>X</label><input x-model.number="offX" type="range" step="0.1" :min="-offXmax" :max="offXmax"><input x-model.number="offX" type="number" step="0.1"></div>
-            <div class="arow"><label>Y</label><input x-model.number="offY" type="range" step="0.1" :min="-offYmax" :max="offYmax"><input x-model.number="offY" type="number" step="0.1"></div>
-            <div class="arow"><label>Z</label><input x-model.number="offZ" type="range" step="0.1" :min="-offZmax" :max="offZmax"><input x-model.number="offZ" type="number" step="0.1"></div>
+            <div class="arow"><label>X</label><div x-jog="offX"></div><input x-model.number="offX" type="number" step="0.1"></div>
+            <div class="arow"><label>Y</label><div x-jog="offY"></div><input x-model.number="offY" type="number" step="0.1"></div>
+            <div class="arow"><label>Z</label><div x-jog="offZ"></div><input x-model.number="offZ" type="number" step="0.1"></div>
             <h4>Pivot</h4>
-            <div class="arow"><label>X</label><input x-model.number="pivX" type="range" step="0.1" :min="anchorXmin" :max="anchorXmax"><input x-model.number="pivX" type="number" step="0.1"></div>
-            <div class="arow"><label>Y</label><input x-model.number="pivY" type="range" step="0.1" :min="anchorYmin" :max="anchorYmax"><input x-model.number="pivY" type="number" step="0.1"></div>
+            <div class="arow"><label>X</label><div x-jog="pivX"></div><input x-model.number="pivX" type="number" step="0.1"></div>
+            <div class="arow"><label>Y</label><div x-jog="pivY"></div><input x-model.number="pivY" type="number" step="0.1"></div>
             <p class="hint">The pivot is the point each link is turned around against the one before — it only changes curved chains.</p>
           </div>
         </details>
