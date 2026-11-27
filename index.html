@@ -318,9 +318,9 @@
               <button :class="{ on: lsMode==='pinch' }"   @click="lsMode='pinch'">Pinch</button>
             </div></div>
           <p class="hint" x-show="lsMode==='push'">Moves the surface along the arrow.</p>
-          <p class="hint" x-show="lsMode==='inflate'">Swells the surface outwards (negative amount: hollows it).</p>
+          <p class="hint" x-show="lsMode==='inflate'">Swells the surface outwards (type a negative amount to hollow it).</p>
           <p class="hint" x-show="lsMode==='pinch'">Pulls the surface towards the point.</p>
-          <div class="srow"><label>Amount (mm)</label><input x-model.number="lsIntensity" type="range" :min="-amountMax" :max="amountMax" step="0.5"><input x-model.number="lsIntensity" type="number" step="0.5" min="-200" max="200"></div>
+          <div class="srow"><label>Amount (mm)</label><input x-model.number="lsIntensity" type="range" min="0" max="200" step="0.5"><input x-model.number="lsIntensity" type="number" step="0.5" min="-200" max="200"></div>
           <div class="srow"><label>Reach (mm)</label><input x-model.number="lsRadius" type="range" min="1" :max="reachMax" step="1"><input x-model.number="lsRadius" type="number" step="1" min="0.5"></div>
           <p class="hint">Drag the handles on the point in the view: the <b>arrows</b> move it, the <b>rings</b> turn its arrow, the <b>ball</b> moves it freely. Hold <kbd>Shift</kbd> to snap.</p>
           <label class="check"><input type="checkbox" x-model="lsMirror"> <span>Mirror to the other side</span></label>
@@ -620,6 +620,17 @@
             <p class="hint" id="solveOut" x-html="solveOut"></p>
           </div>
         </details>
+
+        <details class="fold">
+          <summary>Fast preview <span class="sum" x-text="previewSummary"></span></summary>
+          <div class="foldbody">
+            <p class="hint">A detailed link, drawn once for every place in the chain, makes the view slow. So the chain is drawn from a lighter copy of the link. That is only the picture: the part, the overlap check and the exported file keep every vertex.</p>
+            <div class="row">
+              <label class="check"><input type="checkbox" x-model="previewReduce"> <span>Lighter links — at most</span></label>
+              <input x-model.number.debounce.400ms="previewMaxVerts" type="number" min="100" step="500" :disabled="!previewReduce"><span class="unit">vertices per link</span></div>
+            <p class="hint" id="previewInfo" x-html="previewInfo"></p>
+          </div>
+        </details>
       </section>
 
       <!-- ============================ 4 · EXPORT ============================ -->
@@ -675,9 +686,14 @@
           <p class="hint" x-show="exportFmtNow==='3mf' && exportPalette.length && !exportMixOn">In the slicer use <b>File → Import</b> (not “Open project”) and give filament 1, 2, 3 … these colours. Filament 1 is the object's own filament; the others arrive as colour painting.</p>
           <p class="hint" x-show="exportMixOn && exportPalette.length">Left the colour of the chain, right what the mix should look like, then the filament number it is painted with. Open this file with <b>File → Open project</b>: the mixes are print settings and only come along that way. The project takes its printer, process and filament settings from <code>slicer/snapmaker_u1_project_settings.json</code> (Snapmaker U1, 0.4 nozzle) — change them in the slicer as you like.</p>
         </div>
-        <div class="row">
-          <label class="check"><input type="checkbox" x-model="exportReduce"> <span>Smaller file — at most</span></label>
-          <input x-model.number="exportMaxVerts" type="number" min="50" step="250" :disabled="!exportReduce"><span class="unit">vertices per link</span></div>
+        <div class="row"><label>Detail</label>
+          <div class="seg">
+            <button :class="{ on: exportDetail==='full' }" @click="exportDetail='full'" title="Every vertex of the part">Full</button>
+            <button :class="{ on: exportDetail==='fine' }" @click="exportDetail='fine'" title="High quality, smaller file: vertices are left out only where the surface hardly moves">Fine</button>
+            <button :class="{ on: exportDetail==='cap' }"  @click="exportDetail='cap'" title="A number of vertices per link that you set">Vertex limit</button>
+          </div></div>
+        <div class="row" x-show="exportDetail==='cap'"><label>At most</label>
+          <input x-model.number="exportMaxVerts" type="number" min="50" step="250"><span class="unit">vertices per link</span></div>
         <p class="hint" id="exportEst" x-html="exportEst"></p>
         <p class="hint">Press <b x-text="exportLabel"></b> below when you're ready.</p>
         <p class="verdict ok" id="exportOut" x-show="exportOut" x-html="exportOut"></p>

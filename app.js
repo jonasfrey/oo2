@@ -55,8 +55,10 @@ const CONST = {
   OVERRIDE_COLOR      : new THREE.Color(0xc792ea),// links swapped for a custom model
   SELECT_COLOR        : 0xffffff,// selection box around the picked link
   STL_BYTES_PER_TRI   : 50,     // binary STL: 50 bytes/triangle + 84-byte header
-  MAX_VERTS_PER_LINK  : 2000,   // default vertex cap per link for the optional "smaller file" reduction at export
-  BIG_FILE_MB         : 100,    // a full-detail file estimated above this → the Export page points at "Smaller file"
+  PREVIEW_VERTS       : 4000,   // "Fast preview": the links of the chain are drawn with at most this many vertices each
+  EXPORT_FINE_MM      : 0.005,  // file detail "Fine": the simplifier leaves vertices out while its error stays below this
+  MAX_VERTS_PER_LINK  : 2000,   // file detail "Vertex limit": default cap per link
+  BIG_FILE_MB         : 100,    // a full-detail file estimated above this → the Export page points at "Fine"
                                 // (≈4k tris/link → 400 links ≈ 1.6M tris ≈ 76 MB STL)
 };
 
@@ -287,7 +289,7 @@ const S = {
   lsPreviewGeo:null,    // cloned geo currently shown as deformed preview in the lsculpt step
   lsActiveNodeIdx:-1,   // which node is selected for editing
   lsChainGroup:null,    // THREE.Group with one deformed Mesh per link (replaces S.chain visually)
-  mirroredBaseGeo:null, // cached full-part geometry built from the half-part when mirror is enabled
+  mirroredBaseGeo:null, mirrorKey:'',   // a half part mirrored into the full link, as the chain draws it (see chainDrawGeo) — and what it was made from
   footCenter:null,       // middle of the chain's footprint (set by regen) — the print bed is drawn centred under it
   deco:null,            // object fused onto the link: {name,colorSource,missing,work,geo,mesh,fused,linkPreFuse,preFuseColor,meshId,linkMeshId}
   decoGhost:null,       // translucent neighbouring link (+ its object) shown while placing the object
@@ -396,7 +398,7 @@ function setBaseGeometry(geo, opts={}){
   S.alignMatrix.identity();                         // fresh part → its own alignment starts from scratch
   S.selectedLink=null; if(S.selBox){ scene.remove(S.selBox); S.selBox=null; }
   if (S.baseGeo){ S.baseGeo.disposeBoundsTree?.(); S.baseGeo.dispose(); }
-  if (S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
+  dropMirroredGeo();
 
   S.baseGeo = geo;
   decoDetachFromLink();                      // a fused object belonged to the old link → back to "placed, not fused"
@@ -902,7 +904,6 @@ function removeCut(){
 function cutChanged(){
   dropCutGeo();
   const ok = !UI.cutOn || chainPartGeo()!==S.baseGeo;
-  updateMirroredBase();
   if(S.poses.length) regen();
   updateCutPreview();
   return ok;
@@ -1527,7 +1528,7 @@ function paintChain(poses, bad){
     S.chain.setColorAt(i, _tmpCol);
   }
   if(S.chain.instanceColor) S.chain.instanceColor.needsUpdate=true;
-  if(vc) S.baseGeo.setAttribute('aSwap', new THREE.InstancedBufferAttribute(swapArr,1));
+  if(vc) S.chain.geometry.setAttribute('aSwap', new THREE.InstancedBufferAttribute(swapArr,1));   // on what the chain is drawn from (the light copy, the mirrored link …)
 }
 /* ======================================================================== *
  *  MIRROR HALF — build a full symmetric part from a half-mesh at chain time
@@ -1591,14 +1592,24 @@ function buildMirroredGeo(srcGeo){
   return welded;
 }
 
-function updateMirroredBase(){
-  if(S.mirroredBaseGeo){ S.mirroredBaseGeo.dispose(); S.mirroredBaseGeo=null; }
-  if(UI&&UI.mirrorEnabled&&S.baseGeo) S.mirroredBaseGeo=buildMirroredGeo(chainPartGeo());
+function dropMirroredGeo(){
+  if(S.mirroredBaseGeo) S.mirroredBaseGeo.dispose();
+  S.mirroredBaseGeo=null; S.mirrorKey='';
+}
+/* What a link of the chain is drawn from: the light copy of the part ("Fast preview", see liteOf) — of a half part,
+   mirrored into the full link. Made when first needed and again when the part, the cut, the preview detail or the
+   mirror plane has changed. The overlap check and the file don't use it: they work on the part itself. */
+function chainDrawGeo(){
+  const g=liteOf(chainPartGeo());
+  if(!(UI && UI.mirrorEnabled)){ dropMirroredGeo(); return g; }
+  const key=[g.uuid, g.attributes.position.version, UI.mirrorAxis, UI.mirrorOffset].join('|');
+  if(S.mirrorKey!==key){ dropMirroredGeo(); S.mirrorKey=key; S.mirroredBaseGeo=buildMirroredGeo(g); }
+  return S.mirroredBaseGeo;
 }
 let mirrorRegenTimer=null;
 function debounceMirrorRegen(){
   clearTimeout(mirrorRegenTimer);
-  mirrorRegenTimer=setTimeout(()=>{ updateMirroredBase(); if(S.poses.length) regen(); },250);
+  mirrorRegenTimer=setTimeout(()=>{ if(S.poses.length) regen(); },250);
 }
 
 function disposeLSChainGroup(){
@@ -1612,12 +1623,11 @@ function buildLSChainGroup(poses){
   disposeLSChainGroup();
   if(!S.lsNodes.length || !poses.length) return;
   const N=poses.length, vc=hasVColor(S.baseGeo);
-  const group=new THREE.Group();
+  const group=new THREE.Group(), src=chainDrawGeo();   // every link is its own copy, bent its own way — of the light geometry the chain is drawn from
   for(let i=0;i<N;i++){
     if(S.overrides.has(i)) continue;   // overrideGroup handles custom slots
     const nor=N>1?i/(N-1):0;
-    // use cached mirrored base if mirror is enabled (much faster than rebuilding per link)
-    const geo=(UI&&UI.mirrorEnabled&&S.mirroredBaseGeo)?S.mirroredBaseGeo.clone():linkGeom(i).clone();
+    const geo=src.clone();
     applyLSDeform(geo,i,nor,cutShift());
     const base=vc?WHITE:(i===0?CONST.LINK_SEED_COLOR:CONST.LINK_OK_COLOR);
     linkPaint(i,N,base,vc);            // writes result into _tmpCol
@@ -1646,7 +1656,7 @@ function recolorLSChain(bad){
 function renderChain(poses){
   if(S.chain){scene.remove(S.chain);S.chain.dispose();}
   disposeLSChainGroup();
-  const chainGeo=(UI&&UI.mirrorEnabled&&S.mirroredBaseGeo)?S.mirroredBaseGeo:chainPartGeo();
+  const chainGeo=chainDrawGeo();
   const mat=partMaterial(chainGeo,{roughness:.7});
   if(hasVColor(chainGeo)) installSwapShader(mat);
   S.chain=new THREE.InstancedMesh(chainGeo, mat, poses.length);
@@ -1699,7 +1709,7 @@ function checkCollisions(poses){
       inv.copy(linkWorldMatrix(i)).invert().multiply(linkWorldMatrix(j));   // bring link j into link i's frame
       if(linkGeom(i).boundsTree.intersectsGeometry(linkGeom(j),inv)){
         bad.add(i); bad.add(j);
-        overlapSpots(linkGeom(i), linkGeom(j), inv, linkWorldMatrix(i), `link ${i+1} and link ${j+1}`, where);
+        overlapPicture(linkGeom(i), linkGeom(j), inv, linkWorldMatrix(i), `link ${i+1} and link ${j+1}`, where);
       }
     }
   }
@@ -1739,6 +1749,19 @@ function overlapSpots(geoA, geoB, toA, world, label, where){
     }
   }
   for(const s of spots){ s.center=s.box.getCenter(new THREE.Vector3()); s.radius=s.box.getSize(new THREE.Vector3()).length()/2; where.spots.push(s); }
+}
+/* The picture of an overlap the test has found. WHETHER two links touch is decided on the meshes themselves, in full
+   detail. WHERE is drawn from their light copies (see liteOf): two detailed links lying deep in each other cross in
+   thousands of triangles, and following all of them makes a step of a drag take up to a second — while the line
+   through the light copies is a hair off at most. Two links that only just touch can miss each other as light
+   copies; then the line comes from the meshes themselves — and is short. */
+function overlapPicture(geoA, geoB, toA, world, label, where){
+  const la=liteOf(geoA), lb=liteOf(geoB), had=where.lines.length;
+  if(la!==geoA || lb!==geoB){
+    overlapSpots(la, lb, toA, world, label, where);
+    if(where.lines.length>had) return;
+  }
+  overlapSpots(geoA, geoB, toA, world, label, where);
 }
 /* show them (or, with nothing to show, clear the picture) */
 function setOverlapViz(where){
@@ -1806,6 +1829,7 @@ function regen(force){
   UI.s3nextDisabled=false;
   followContent();                          // more links / another shape → the view stays on the middle of the chain
   updateExportEstimate();                   // file size follows the link count
+  updatePreviewInfo();
   return {bad,off};
 }
 function updatePlate(size, over=false){
@@ -1879,9 +1903,10 @@ async function encodeChain(mesh, geo, fmt, ranges, pal, mix){
 }
 async function exportChain(){
   if(!S.poses.length){status('Build the chain first.','err');return;}
+  await simplifierSettled;                                 // "Detail" has to know whether there is a simplifier
   const fmt=exportFormat();
   const keepColor = fmt!=='stl' && chainHasColours();      // STL has no color; every other format keeps it
-  const cap=exportVertCap(), lite=new Map();               // "Smaller file": source geometry → its lighter copy (made once, used for every link)
+  const detail=exportDetail(), made=new Map();             // source geometry → what its links are in the file (made once, used for every link)
   const pal = keepColor ? chainPalette(exportColourCap(fmt)) : null;   // the colours of the file (null: a plain part)
   let mix = null;                                          // "Mix the colours": a slicer project with mixed filaments
   if(pal && exportMixing(fmt)){
@@ -1889,15 +1914,16 @@ async function exportChain(){
     try{ const r=await fetch(MIX_TEMPLATE); if(!r.ok) throw new Error(r.status); mix.settings=await r.json(); }
     catch(e){ status('The slicer settings for the project ('+MIX_TEMPLATE+') could not be loaded: '+e.message,'err'); return; }
   }
-  if(cap){ status('Reducing the links for the file…'); await new Promise(r=>setTimeout(r,10)); }   // let the status line repaint
+  status(detail.mode==='full' ? 'Writing the file…' : 'Thinning out the links for the file…');
+  await new Promise(r=>setTimeout(r,10));                  // let the status line repaint
   const geos=[], ranges=[], rgb=[0,0,0];
   for(let i=0;i<S.poses.length;i++){
-    let src=exportSource(i);                 // the part (mirrored to the full link for a half part), or a swapped-in model
-    if(cap && src.attributes.position.count>cap){
-      if(!lite.has(src)) lite.set(src, await reducedCopy(src,cap));
-      src=lite.get(src);
+    const src=exportSource(i);               // the part itself — not the light copy the view draws — or a swapped-in model
+    if(!made.has(src)){
+      const mirror=exportMirrors(i), thin=fileGeo(src,mirror);
+      made.set(src, thin ? {geo:thin, thin:true} : mirror ? {geo:buildMirroredGeo(src), own:true} : {geo:src});
     }
-    let g=src.clone();
+    let g=made.get(src).geo.clone();
     if(S.lsNodes.length){ const nor=S.poses.length>1?i/(S.poses.length-1):0; applyLSDeform(g,i,nor,S.overrides.has(i)?0:cutShift()); }
     g.applyMatrix4(linkWorldMatrix(i));      // bake world matrix (incl. any gizmo nudge) → separate solid
     for(const a of Object.keys(g.attributes)) if(a!=='position'&&a!=='normal'&&!(keepColor&&a==='color')) g.deleteAttribute(a);
@@ -1916,14 +1942,15 @@ async function exportChain(){
     geos.push(g);
   }
   const merged=BufferGeometryUtils.mergeGeometries(geos,false);
-  geos.forEach(g=>g.dispose()); lite.forEach(g=>g.dispose());
+  geos.forEach(g=>g.dispose()); made.forEach(m=>{ if(m.own) m.geo.dispose(); });   // (the thinned-out links are kept, see fileGeo)
   const mesh=new THREE.Mesh(merged, keepColor?partMaterial(merged):undefined);
   const tris=merged.index?merged.index.count/3:merged.attributes.position.count/3;
   const {blob,name}=await encodeChain(mesh, merged, fmt, ranges, pal, mix);
   merged.dispose();
   download(blob,name);
   const cols = !pal ? '' : mix ? ` · ${new Set(mix.filamentOf).size} colours from ${mix.filaments.length} filaments (${mix.mixes.length} mixed)` : ` · ${pal.colours.length} colour${pal.colours.length>1?'s':''}`;
-  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles${cols} · ${fmtBytes(blob.size)}${lite.size?' (reduced)':''}.`;
+  const how = ![...made.values()].some(m=>m.thin) ? 'full detail' : detail.mode==='fine' ? 'fine detail' : `at most ${fmtCount(detail.cap)} vertices per link`;
+  UI.exportOut=`✓ Exported <b>${S.poses.length}</b> links · ${tris.toLocaleString()} triangles (${how})${cols} · ${fmtBytes(blob.size)}.`;
   status(name.toUpperCase().split('.').pop()+' downloaded: '+name,'ok');
 }
 
@@ -2290,7 +2317,6 @@ async function applyConfig(cfg){
       UI.mirrorEnabled=!!cfg.mirror.enabled;
       UI.mirrorAxis=cfg.mirror.axis||'x';
       UI.mirrorOffset=cfg.mirror.offset||0;
-      if(UI.mirrorEnabled) updateMirroredBase();
     }
     lsClearAll();                               // the previous project's morph points don't belong to this one
     if(cfg.mirrorPlane){
@@ -2519,16 +2545,20 @@ function xrayMaterials(){
   return o.concat(overrideMaterials(), lsChainMaterials(), S.deco&&S.deco.mesh ? [S.deco.mesh.material] : []);
 }
 
+/* The part's outline in X-ray. Finding the edges of a detailed part takes half a second, and the part changes with
+   every step of a rotation slider — so the outline is dropped when the part changes and made when it is to be seen. */
 function updatePartEdges(){
   if(S.partEdges){ scene.remove(S.partEdges); S.partEdges.geometry.dispose(); S.partEdges.material.dispose(); S.partEdges=null; }
-  if(!S.baseGeo) return;
-  const eg=new THREE.EdgesGeometry(S.baseGeo, CONST.EDGE_ANGLE);
-  S.partEdges=new THREE.LineSegments(eg,new THREE.LineBasicMaterial({color:0x05080c,transparent:true,opacity:.55}));
-  scene.add(S.partEdges);
   syncPartEdges();
 }
 function syncPartEdges(){
-  if(S.partEdges) S.partEdges.visible = UI.xray && !!S.partMesh && S.partMesh.visible;
+  const show = !!UI && UI.xray && !!S.baseGeo && !!S.partMesh && S.partMesh.visible;
+  if(show && !S.partEdges){
+    const eg=new THREE.EdgesGeometry(S.baseGeo, CONST.EDGE_ANGLE);
+    S.partEdges=new THREE.LineSegments(eg,new THREE.LineBasicMaterial({color:0x05080c,transparent:true,opacity:.55}));
+    scene.add(S.partEdges);
+  }
+  if(S.partEdges) S.partEdges.visible = show;
 }
 function updateDebugViz(){
   if(S.dbgPoints){ scene.remove(S.dbgPoints); S.dbgPoints.material.dispose(); S.dbgPoints=null; }   // geometry is the shared baseGeo — don't dispose
@@ -2603,7 +2633,7 @@ function syncMatePreview(){
   let hit=stacked;
   if(!hit){ ensureBVH(); hit=S.baseGeo.boundsTree.intersectsGeometry(S.baseGeo,M); }
   S.mateOverlap=null;
-  if(hit && !stacked){ S.mateOverlap={lines:[],spots:[]}; overlapSpots(S.baseGeo, S.baseGeo, M, new THREE.Matrix4(), 'this link and the next', S.mateOverlap); }
+  if(hit && !stacked){ S.mateOverlap={lines:[],spots:[]}; overlapPicture(S.baseGeo, S.baseGeo, M, new THREE.Matrix4(), 'this link and the next', S.mateOverlap); }
   syncOverlapViz();
   S.matePreview.material.color.set(hit?0xff6b6b:CONST.MATE_COLOR);
   UI.mateState = hit ? 'bad' : 'ok';
@@ -2625,18 +2655,142 @@ function mateGizmoMoved(){
   if(ax.includes('Y')) setLinkOffset('y', mm(mateHandle.position.y-c.y));
 }
 
-/* ---- FILE SIZE / OPTIONAL REDUCTION AT EXPORT ----
-   The part is never reduced while you work on it. Export can write a lighter copy of every link instead
-   ("Smaller file" on the Export page) — that only changes the downloaded file. */
+/* ---- DETAIL: THE PART · THE FAST PREVIEW · THE FILE ----
+   The part keeps every vertex of the file it was loaded from. The part tools work on it, the overlap check tests it
+   and the exported file is made from it.
+   Only the chain is drawn from less. A detailed link, once for every place in the chain, is millions of triangles
+   per frame — and a morphed chain needs a copy of the link per place on top. So the links in the view are a light
+   copy of the part ("Fast preview" on the Chain page: at most N vertices per link; liteOf, chainDrawGeo).
+   Export goes back to the part itself. If asked to, it thins the links out for the file ("Detail" on the Export
+   page; fileGeo) — that changes the downloaded file and nothing else. */
 function triCount(g){ return g ? (g.index ? g.index.count/3 : g.attributes.position.count/3) : 0; }
 function estStlBytes(tris){ return 84 + tris*CONST.STL_BYTES_PER_TRI; }
 function fmtBytes(b){ return b>=1048576 ? (b/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(b/1024))+' KB'; }
-/* the geometry link i is exported from: a swapped-in model, or the part (the full, mirrored one for a half part) */
-function exportSource(i){
-  const o=S.overrides.get(i);
-  return o ? o.geo : (UI.mirrorEnabled&&S.mirroredBaseGeo) ? S.mirroredBaseGeo : chainPartGeo();
+const fmtCount=x=>Math.round(x).toLocaleString();
+const fmtTris=t=>t>=1e6 ? (t/1e6).toFixed(1)+' million' : fmtCount(t);
+const fmtMm=mm=>mm<0.0005 ? 'less than 0.001' : mm<0.01 ? mm.toFixed(3) : mm.toFixed(2);
+
+/* The simplifier takes out vertices that triangles share. A mesh with every triangle on its own — an STL swapped in
+   for a link — has none of those, and is welded first. */
+function isSoup(g){ return !g.index || triCount(g)<g.attributes.position.count; }
+const geoKey=g=>g.attributes.position.version+'|'+(g.attributes.color ? g.attributes.color.version : '');
+/* A geometry made from another one (`make`), kept in `cache` until that one changes (`key`) or is disposed of.
+   null: there was nothing to make. */
+function derivedGeo(cache, src, key, make){
+  const old=cache.get(src);
+  if(old && old.key===key) return old.geo;
+  if(old) old.geo?.dispose();
+  else src.addEventListener('dispose', function gone(){ src.removeEventListener('dispose',gone); cache.get(src)?.geo?.dispose(); cache.delete(src); });
+  let geo=null;
+  try{ geo=make(); }catch(e){ console.warn('thinning out a mesh failed:',e); }
+  cache.set(src,{key,geo});
+  return geo;
 }
-function exportVertCap(){ return UI.exportReduce ? Math.max(50, Math.round(+UI.exportMaxVerts)||CONST.MAX_VERTS_PER_LINK) : 0; }   // 0 = full detail
+/* `src` with fewer vertices: at most `target` of them, or — with `mm` — as few as the simplifier's error allows */
+function thinnedOut(src, opts){
+  const from=isSoup(src) ? weldByPosition(src) : src;
+  try{
+    if(opts.mm) return meshoptReduce(simplifier, from, opts);
+    if(from.attributes.position.count<=opts.target){ const c=from.clone(); c.userData={}; return c; }   // (clone shares userData)
+    if(simplifier){ try{ return meshoptReduce(simplifier, from, opts); }catch(e){ console.warn('meshopt simplify failed, falling back to clustering:',e); } }
+    return clusterDecimateToTarget(from, opts.target);       // the simplifier could not be loaded
+  }finally{ if(from!==src) from.dispose(); }
+}
+/* How far a thinned-out copy is from the mesh it was made from — measured, the simplifier's own figure is a few times
+   too small: vertices of the mesh against the copy's surface, and points on the copy's triangles against the mesh
+   (a sample of each). {max, mean} in mm, kept with the copy. */
+const OFF_SAMPLES=20000;
+function offBy(src, copy){
+  if(copy.userData.off) return copy.userData.off;
+  if(!src.boundsTree) src.boundsTree=new MeshBVH(src);
+  if(!copy.boundsTree) copy.boundsTree=new MeshBVH(copy);
+  const sp=src.attributes.position, cp=copy.attributes.position, ci=copy.index, hit={};
+  const p=new THREE.Vector3(), a=new THREE.Vector3(), b=new THREE.Vector3(), c=new THREE.Vector3();
+  let max=0, sum=0, n=0;
+  for(let i=0, step=Math.max(1,Math.floor(sp.count/OFF_SAMPLES)); i<sp.count; i+=step){
+    const d=copy.boundsTree.closestPointToPoint(p.fromBufferAttribute(sp,i), hit).distance;
+    if(d>max) max=d; sum+=d; n++;
+  }
+  const far=q=>{ const d=src.boundsTree.closestPointToPoint(q, hit).distance; if(d>max) max=d; };
+  for(let t=0, tris=ci.count/3, step=Math.max(1,Math.floor(tris*4/OFF_SAMPLES)); t<tris; t+=step){   // a triangle's middle and the middles of its edges
+    a.fromBufferAttribute(cp,ci.getX(t*3)); b.fromBufferAttribute(cp,ci.getX(t*3+1)); c.fromBufferAttribute(cp,ci.getX(t*3+2));
+    far(p.copy(a).add(b).add(c).multiplyScalar(1/3));
+    far(p.addVectors(a,b).multiplyScalar(.5)); far(p.addVectors(b,c).multiplyScalar(.5)); far(p.addVectors(c,a).multiplyScalar(.5));
+  }
+  return copy.userData.off={max, mean:n?sum/n:0};
+}
+
+/* ---- the fast preview ---- */
+function previewCap(){ return (UI && UI.previewReduce) ? Math.max(100, Math.round(+UI.previewMaxVerts)||CONST.PREVIEW_VERTS) : 0; }   // 0 = every vertex
+const LITE=new WeakMap();        // geometry → {key, geo}: its light copy for the view
+/* The light copy of a geometry, as the chain draws it — or the geometry itself: with "Fast preview" off, when it is
+   light as it is, and for as long as the simplifier has not loaded. */
+function liteOf(src){
+  const cap=previewCap();
+  if(!cap || !simplifier || !src || src.attributes.position.count<=cap) return src;
+  return derivedGeo(LITE, src, geoKey(src)+'|'+cap, ()=>thinnedOut(src,{target:cap})) || src;
+}
+/* "Fast preview" was changed, or the simplifier has arrived: lay the chain out again, from the right geometry */
+function previewChanged(){
+  if(!UI || !S.baseGeo) return;
+  if(S.poses.length && anchorsValid()) regen();
+  else{ syncMatePreview(); updatePreviewInfo(); updateExportEstimate(); }
+}
+/* what the view draws for the chain, in words (Chain page) and on the chip in the view */
+function updatePreviewInfo(){
+  if(!UI) return;
+  if(!S.baseGeo || !S.chain || !S.poses.length){ UI.previewInfo=''; return; }
+  const src=chainPartGeo(), lite=liteOf(src), drawn=chainDrawGeo(), twice=UI.mirrorEnabled?2:1;   // a half part: two halves per link
+  const fullV=src.attributes.position.count*twice, drawnV=lite.attributes.position.count*twice;
+  let fullT=0, drawnT=0;
+  for(let i=0;i<S.poses.length;i++){
+    const o=S.overrides.get(i);
+    if(o){ const t=triCount(o.geo); fullT+=t; drawnT+=t; }                 // swapped links are drawn as they are
+    else { fullT+=triCount(src)*twice; drawnT+=triCount(drawn); }
+  }
+  if(lite!==src){
+    const off=offBy(src, lite);
+    UI.previewInfo=`Each link is drawn with <b>${fmtCount(drawnV)}</b> of ${fmtCount(fullV)} vertices: ${fmtTris(drawnT)} triangles in the view instead of ${fmtTris(fullT)}. `
+      + `The light copy is ${fmtMm(off.mean)} mm off the part on average, ${fmtMm(off.max)} mm at most.`;
+  }else{
+    UI.previewInfo = !UI.previewReduce ? `Each link is drawn with all its <b>${fmtCount(drawnV)}</b> vertices: ${fmtTris(drawnT)} triangles in the view.`
+      : simplifier===false ? `The simplifier could not be loaded, so each link is drawn with all its ${fmtCount(drawnV)} vertices: ${fmtTris(drawnT)} triangles in the view.`
+      : `The link has only <b>${fmtCount(drawnV)}</b> vertices — it is drawn as it is.`;
+  }
+  if(viewKind(S.uiStep)==='chain')
+    UI.chipMesh = lite!==src ? `<b>${fmtCount(fullV)}</b> verts per link · drawn with ${fmtCount(drawnV)}` : `<b>${fmtCount(drawnV)}</b> verts per link`;
+}
+
+/* ---- the file ---- */
+/* the geometry link i is exported from: a swapped-in model, or the part — cut where "Flatten the bottom" says so */
+function exportSource(i){ const o=S.overrides.get(i); return o ? o.geo : chainPartGeo(); }
+/* … and a half part is mirrored into the full link (a swapped-in model is a whole one) */
+function exportMirrors(i){ return !!UI.mirrorEnabled && !S.overrides.has(i); }
+function exportDetail(){     // "Detail" on the Export page
+  if(UI.exportDetail==='fine') return {mode:'fine'};
+  if(UI.exportDetail==='cap')  return {mode:'cap', cap:Math.max(50, Math.round(+UI.exportMaxVerts)||CONST.MAX_VERTS_PER_LINK)};
+  return {mode:'full'};
+}
+const FILE=new WeakMap();        // geometry → {key, geo}: the thinned-out link made from it for the file
+/* What a link made from `src` is in the file when "Detail" asks for less than everything: `src` thinned out — and a
+   half part mirrored into the full link after that, so the two halves stay mirror images and meet in the same
+   vertices. Kept: the Export page shows its size, the download uses it. null: nothing to leave out, the file takes
+   `src` as it is. */
+function fileGeo(src, mirror){
+  const d=exportDetail();
+  if(d.mode==='full' || (d.mode==='fine' && !simplifier)) return null;
+  const cap = d.mode==='cap' ? (mirror ? Math.ceil(d.cap/2) : d.cap) : 0;
+  if(cap && src.attributes.position.count<=cap) return null;
+  const key=[geoKey(src), d.mode, cap, mirror ? UI.mirrorAxis+UI.mirrorOffset : ''].join('|');
+  return derivedGeo(FILE, src, key, ()=>{
+    let g=thinnedOut(src, cap ? {target:cap} : {mm:CONST.EXPORT_FINE_MM});
+    if(triCount(g)>triCount(src)*0.98){ g.dispose(); return null; }      // next to nothing to gain: the file takes the part as it is
+    const off=offBy(src, g), verts=g.attributes.position.count*(mirror?2:1);
+    if(mirror){ const half=g; g=buildMirroredGeo(half); half.dispose(); }
+    g.userData={off, verts};                 // for the Export page: how far off the part, how many vertices per link
+    return g;
+  });
+}
 /* the colours the file will have (Export page): the legend under "At most N colours" */
 function updateExportPalette(){
   const fmt=exportFormat();
@@ -2647,32 +2801,43 @@ function updateExportPalette(){
     ...(mix ? {fil:mix.filamentOf[i], made:mix.colours[i].hex, recipe:mix.colours[i].recipe} : {fil:i+1})}));
   UI.exportFound=pal.found;
 }
+/* how much detail the file gets and how big it will be, in words (Export page) */
 function updateExportEstimate(){
   if(!S.baseGeo){ UI.exportEst=''; return; }
   updateExportLabel();        // "automatic" follows the chain's colours
   updateExportPalette();
-  const links=S.poses.length||Math.max(1,UI.count||1), cap=exportVertCap();
-  let full=0, lite=0;
+  if(S.uiStep!=='s4') return;                // shown on the Export page only — and "Fine" has to make the thinned-out link to count it
+  const links=S.poses.length||Math.max(1,UI.count||1), d=exportDetail();
+  const part=chainPartGeo(), partV=part.attributes.position.count*(UI.mirrorEnabled?2:1);
+  let full=0, file=0;
   for(let i=0;i<links;i++){
-    const t=triCount(exportSource(i));
-    full+=t; lite+= cap ? Math.min(t,2*cap) : t;         // a closed mesh has about two triangles per vertex
+    const src=exportSource(i), mirror=exportMirrors(i), t=triCount(src)*(mirror?2:1);
+    full+=t;
+    if(d.mode==='fine'){ const g=fileGeo(src,mirror); file+= g ? triCount(g) : t; }
+    else file+= d.mode==='cap' ? Math.min(t,2*d.cap) : t;      // a closed mesh has about two triangles per vertex
   }
-  const partV=S.baseGeo.attributes.position.count*((UI.mirrorEnabled&&S.mirroredBaseGeo)?2:1);
-  const size=t=>fmtBytes(estStlBytes(Math.round(t))), n=x=>x.toLocaleString();
-  UI.exportEst = !cap
-    ? `Full detail: <b>${n(partV)}</b> vertices per link · the file will be about <b>${size(full)}</b> as STL (${links} links).`
-      + (estStlBytes(full)>CONST.BIG_FILE_MB*1048576 ? ` <span style="color:var(--warn)">That is a large file — tick “Smaller file” for a lighter one.</span>` : '')
-    : lite<full
-      ? `${partV>cap ? `At most <b>${n(cap)}</b> of ${n(partV)} vertices per link` : `Swapped links reduced to at most <b>${n(cap)}</b> vertices`} · the file will be about <b>${size(lite)}</b> as STL instead of ${size(full)} (${links} links). Only the file is reduced — the part here keeps its detail.`
-      : `Nothing to reduce — the link has only ${n(partV)} vertices. The file will be about <b>${size(full)}</b> as STL (${links} links).`;
-}
-/* a lighter copy of a link, for the file. Welded first: the simplifier only removes vertices that triangles share,
-   and a mirrored half or a swapped-in model can come with every triangle on its own. */
-async function reducedCopy(src, cap){
-  const welded=weldByPosition(src);
-  const g=await decimateToVertexTarget(welded,cap);
-  welded.dispose();
-  return g;
+  const size=t=>fmtBytes(estStlBytes(Math.round(t))), n=fmtCount, tail=` as STL (${links} links)`;
+  let msg;
+  if(d.mode==='fine' && simplifier){
+    const g=fileGeo(part, !!UI.mirrorEnabled), off=g && g.userData.off;
+    msg = file>=full ? `Fine: this link has no vertices to spare — the file keeps all ${n(partV)} per link and will be about <b>${size(full)}</b>${tail}.`
+      : (g ? `Fine: <b>${n(g.userData.verts)}</b> of ${n(partV)} vertices per link` : `Fine: only the swapped links have vertices to spare`)
+        + ` · the file will be about <b>${size(file)}</b> instead of ${size(full)}${tail}.`
+        + (off ? ` Vertices are left out only where the surface hardly moves: by ${fmtMm(off.mean)} mm on average, ${fmtMm(off.max)} mm at most${off.max<=0.05 ? ' — a printer can\'t show that' : ''}.` : '');
+  }else if(d.mode==='fine'){
+    msg = simplifier===null ? 'Loading the simplifier…'
+      : `The simplifier could not be loaded, so the file keeps every vertex — <b>${n(partV)}</b> per link, about <b>${size(full)}</b>${tail}.`;
+  }else if(d.mode==='cap'){
+    msg = file<full
+      ? `${partV>d.cap ? `At most <b>${n(d.cap)}</b> of ${n(partV)} vertices per link` : `Swapped links reduced to at most <b>${n(d.cap)}</b> vertices`} · the file will be about <b>${size(file)}</b> instead of ${size(full)}${tail}.`
+      : `Nothing to leave out — the link has only ${n(partV)} vertices. The file will be about <b>${size(full)}</b>${tail}.`;
+  }else{
+    msg = `Full detail: every vertex of the part — <b>${n(partV)}</b> per link · the file will be about <b>${size(full)}</b>${tail}.`
+      + (estStlBytes(full)>CONST.BIG_FILE_MB*1048576 ? ` <span style="color:var(--warn)">That is a large file — “Fine” makes a much lighter one.</span>` : '');
+  }
+  if(S.chain && liteOf(part)!==part)
+    msg+=`<br>The chain in the view is a fast preview (${n(liteOf(part).attributes.position.count*(UI.mirrorEnabled?2:1))} vertices per link) — the file is made from the part itself.`;
+  UI.exportEst=msg;
 }
 function swapBaseGeometry(geo, {weld=true}={}){
   if(weld) geo = weldByPosition(geo);
@@ -2695,6 +2860,7 @@ function swapBaseGeometry(geo, {weld=true}={}){
   updatePartEdges(); updateDebugViz(); updateMeshChips();
   followContent();                                         // e.g. a cut or a fused object changed the part's extent
 }
+let simplifier=null;             // the meshopt simplifier once it has loaded · false: it could not be loaded
 let _simplifierP=null;
 function getSimplifier(){
   if(!_simplifierP) _simplifierP = import('meshoptimizer')
@@ -2702,6 +2868,11 @@ function getSimplifier(){
                                                   return m.MeshoptSimplifier; }));
   return _simplifierP;
 }
+/* Fetched right away: a chain is laid out in one go, so the light copies of its links are made on the spot — the
+   simplifier has to be there by then. A chain laid out before it has arrived is drawn in full detail until it has. */
+const simplifierSettled=getSimplifier()
+  .then(M=>{ simplifier=M; }, e=>{ simplifier=false; console.warn('the simplifier could not be loaded — chains are drawn in full detail:',e); });
+simplifierSettled.then(()=>previewChanged());
 const COLOR_WEIGHTS=[0.5,0.5,0.5];   // how hard meshopt fights to preserve per-vertex RGB during collapse
 function compactIndexed(srcPos, index, srcCol){
   const remap=new Int32Array(srcPos.length/3).fill(-1);
@@ -2718,8 +2889,9 @@ function compactIndexed(srcPos, index, srcCol){
   g.setIndex(new THREE.Uint32BufferAttribute(outIdx,1));
   return g;
 }
-async function meshoptDecimate(src,target){
-  const M=await getSimplifier();
+/* Thin a mesh out with meshopt (`M`): down to at most `target` vertices — or, with `mm`, for as long as meshopt's own
+   error stays below that (the surface ends up a few times further off than that figure, see offBy). */
+function meshoptReduce(M, src, {target=0, mm=0}){
   let g=src;
   if(!g.index){ const b=new THREE.BufferGeometry(); b.setAttribute('position',g.getAttribute('position').clone());
                 const c=asRGB(g); if(c) b.setAttribute('color', c===g.getAttribute('color')?c.clone():c);
@@ -2728,19 +2900,26 @@ async function meshoptDecimate(src,target){
   const colAttr=g.getAttribute('color');
   const colArr=colAttr ? (colAttr.array instanceof Float32Array ? colAttr.array : Float32Array.from(colAttr.array)) : null;
   const srcIdx=g.index.array instanceof Uint32Array ? g.index.array : new Uint32Array(g.index.array);
-  const srcTris=srcIdx.length/3;
-  const simp=ic=> colArr
-    ? M.simplifyWithAttributes(srcIdx, positions, 3, colArr, 3, COLOR_WEIGHTS, null, ic, 1, ['LockBorder'])
-    : M.simplify(srcIdx, positions, 3, ic, 1, ['LockBorder']);
-  const count=i=>{ const s=new Set(); for(let k=0;k<i.length;k++) s.add(i[k]); return s.size; };
-  let lo=2, hi=srcTris, best=null;
-  for(let it=0; it<12 && lo<=hi; it++){
-    const tTris=Math.max(1,Math.floor((lo+hi)/2));
-    const [idx]=simp(tTris*3);
-    if(count(idx)>target) hi=tTris-1;
-    else { best=idx; lo=tTris+1; }                              // keep the densest result still ≤ target
+  const simp=(tris,err)=>{ const ic=Math.max(3,Math.floor(tris)*3);
+    return (colArr ? M.simplifyWithAttributes(srcIdx, positions, 3, colArr, 3, COLOR_WEIGHTS, null, ic, err, ['LockBorder'])
+                   : M.simplify(srcIdx, positions, 3, ic, err, ['LockBorder']))[0]; };
+  let best=null;
+  if(mm>0) best=simp(1, mm/M.getScale(positions,3));            // meshopt measures its error against the size of the mesh
+  else{
+    const seen=new Uint8Array(positions.length/3);
+    const count=ix=>{ seen.fill(0); let k=0; for(let i=0;i<ix.length;i++) if(!seen[ix[i]]){ seen[ix[i]]=1; k++; } return k; };
+    // a closed mesh has about two triangles per vertex: ask for that many, then correct by what came out —
+    // one or two calls where a blind search takes a dozen (each is a pass over the whole mesh)
+    let tris=target*2, bestV=0, last=null;
+    for(let it=0; it<8; it++){
+      const ix=simp(tris,1), v=count(ix), stuck=last && v>target && ix.length>=last.length;
+      last=ix;
+      if(v<=target && v>bestV){ best=ix; bestV=v; }
+      if(stuck || (v<=target && (v>=target*0.95 || it>=3))) break;
+      tris = v>target ? tris*Math.min(0.98*target/v, 0.9) : tris*target/Math.max(1,v);
+    }
+    if(!best) best=last;                                        // can't get that low (locked borders): as low as it went
   }
-  if(!best){ const [idx]=simp(3); best=idx; }
   const out=compactIndexed(positions, best, colArr);
   out.computeVertexNormals(); out.computeBoundingBox(); out.computeBoundingSphere();
   return out;
@@ -2783,12 +2962,6 @@ function clusterDecimateToTarget(src,target){          // offline fallback (grid
   const out=best||clusterDecimate(src,2);
   out.computeBoundingBox(); out.computeBoundingSphere();
   return out;
-}
-async function decimateToVertexTarget(src,target){
-  if(src.attributes.position.count<=target) return src.clone();
-  try{ return await meshoptDecimate(src,target); }
-  catch(e){ console.warn('meshopt simplify unavailable, falling back to clustering:',e);
-            return clusterDecimateToTarget(src,target); }
 }
 
 /* ======================================================================== *
@@ -3920,7 +4093,8 @@ function chainApp(){
     exportOut:'', exportLabel:'⬇ Download STL', exportFmt:'auto', exportFmtNow:'stl',   // exportFmtNow: what 'auto' comes to
     exportLimitColours:true, exportMaxColours:4, exportPalette:[], exportFound:0, chainColoured:false,
     exportMix:false, exportFilaments:['#00C3FF','#F54399','#FAE727','#000000'],       // 3MF: make the colours from these loaded filaments (cyan, magenta, yellow, black) and mixes of two     // at most N colours in the file — one per filament
-    exportReduce:false, exportMaxVerts:CONST.MAX_VERTS_PER_LINK, exportEst:'',   // optional: fewer vertices per link, in the file only
+    exportDetail:'full', exportMaxVerts:CONST.MAX_VERTS_PER_LINK, exportEst:'',   // the file: 'full' = every vertex of the part · 'fine' = only what doesn't show left out · 'cap' = at most exportMaxVerts per link
+    previewReduce:true, previewMaxVerts:CONST.PREVIEW_VERTS, previewInfo:'',       // the view: the links of the chain are drawn from a light copy of the part
     /* ----- decorate (optional step) ----- */
     decoLoaded:false, decoFused:false, decoCanEdit:false, decoBusy:false,
     decoInfo:'', decoTouch:'', decoMate:'', decoFuseOut:'', decoColorSource:'',
@@ -3963,8 +4137,16 @@ function chainApp(){
       this.$watch('startR', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
       this.$watch('spacing', ()=>{ if(!this._loading) regeneratePathFromSliders(); });
       this.$watch('plate', ()=>{ if(!this._loading) debounceRegen(); });
-      this.$watch('exportReduce', ()=>updateExportEstimate());
-      this.$watch('exportMaxVerts', ()=>updateExportEstimate());
+      try{ const d=JSON.parse(localStorage.getItem('exportDetail')||'null');   // how much detail a file should have is a habit, like its format — remember it
+           if(d && ['full','fine','cap'].includes(d.mode)){ this.exportDetail=d.mode; if(d.verts>=50) this.exportMaxVerts=d.verts; } }catch(e){}
+      const detailSet=()=>{ localStorage.setItem('exportDetail', JSON.stringify({mode:this.exportDetail, verts:this.exportMaxVerts})); updateExportEstimate(); };
+      this.$watch('exportDetail', detailSet);
+      this.$watch('exportMaxVerts', detailSet);
+      try{ const p=JSON.parse(localStorage.getItem('preview')||'null');        // … and so is what this computer draws comfortably
+           if(p){ this.previewReduce=p.on!==false; if(p.verts>=100) this.previewMaxVerts=p.verts; } }catch(e){}
+      const previewSet=()=>{ localStorage.setItem('preview', JSON.stringify({on:this.previewReduce, verts:this.previewMaxVerts})); previewChanged(); };
+      this.$watch('previewReduce', previewSet);
+      this.$watch('previewMaxVerts', previewSet);
       this.$watch('sectionZ', ()=>updateSectionPlane());
       this.$watch('cutHeight', v=>{              // moving the slider shows the cut plane — no separate "preview" toggle
         if(v>this.cutMin && S.baseGeo && S.uiStep==='s1') this.cutPreview=true; else if(!(v>this.cutMin)) clearCutPreview();
@@ -3993,8 +4175,8 @@ function chainApp(){
         this.$watch(k, hmReproc);
 
       // mirror half
-      this.$watch('mirrorEnabled', ()=>{ updateMirroredBase(); lsPlaneChanged(); if(S.poses.length) regen(); });
-      this.$watch('mirrorAxis',    ()=>{ if(UI.mirrorEnabled){ updateMirroredBase(); lsPlaneChanged(); if(S.poses.length) regen(); } });
+      this.$watch('mirrorEnabled', ()=>{ lsPlaneChanged(); if(S.poses.length) regen(); });
+      this.$watch('mirrorAxis',    ()=>{ if(UI.mirrorEnabled){ lsPlaneChanged(); if(S.poses.length) regen(); } });
       this.$watch('mirrorOffset',  ()=>{ if(UI.mirrorEnabled){ lsPlaneChanged(); debounceMirrorRegen(); } });
 
       // loop sculpt bridges
@@ -4109,7 +4291,6 @@ function chainApp(){
     onFileInput(e){ if(e.target.files[0])loadFile(e.target.files[0]); e.target.value=''; },   // reset → the same file can be picked again
     get brushMax(){ return Math.max(5, Math.ceil(this.partSize*0.75)); },
     get reachMax(){ return Math.max(5, Math.ceil(this.partSize*1.5)); },
-    get amountMax(){ return Math.max(2, Math.ceil(this.partSize*0.5)); },
     autoAlign, nudge, setArm, layFlat, detectSymmetry, centerPart,
     alignZ(){ alignInPlane(); S.partX=0; this.partX=0; S.partY=0; this.partY=0; S.partZ=0; this.partZ=0; frameCamera(); status('Auto-rotated: longest axis on X.','ok'); },
     resetRotXY(){ rotatePartX(0); this.partX=0; rotatePartY(0); this.partY=0; },
@@ -4176,6 +4357,7 @@ function chainApp(){
 
     /* ---- step 3 actions ---- */
     recheck(){ regen(true); },
+    get previewSummary(){ return this.previewReduce ? `at most ${fmtCount(+this.previewMaxVerts||CONST.PREVIEW_VERTS)} vertices per link` : 'off'; },
     reverseChain,
     pathReset(){ regeneratePathFromSliders(); },
     scaleReset(){ this.scalePreset('same'); },
